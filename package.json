@@ -1,10 +1,10 @@
 {
-  "name": "node-express-mongoose",
-  "description": "A boilerplate application for express mongoose",
-  "version": "0.0.1",
+  "name": "Maqaw-Site",
+  "description": "Maqaw Main Site",
+  "version": "0.1",
   "author": {
-    "name": "Madhusudhan Srinivasa",
-    "email": "me@madhums.me"
+    "name": "Maqaw Team",
+    "email": "charlie@maqaw.com"
   },
   "engines": {
     "node": "0.10.x",
