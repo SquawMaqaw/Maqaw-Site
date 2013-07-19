@@ -3,9 +3,11 @@
  * Module dependencies
  */
 
-var mongoose = require('mongoose')
-var Schema = mongoose.Schema
-var userPlugin = require('mongoose-user')
+var mongoose = require('mongoose'),
+    Schema = mongoose.Schema,
+    passportLocalMongoose = require('passport-local-mongoose');
+
+
 
 /**
  * User schema
@@ -22,7 +24,9 @@ var UserSchema = new Schema({
  * User plugin
  */
 
-UserSchema.plugin(userPlugin, {})
+UserSchema.plugin(passportLocalMongoose, {
+  usernameField: 'email'
+});
 
 /**
  * Add your

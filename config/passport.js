@@ -32,16 +32,25 @@ module.exports = function (passport, config) {
       var options = {
         criteria: { email: email }
       }
-      User.load(options, function (err, user) {
+      console.log("Right before loading User");
+      User.findOne({ email: email }, function(err, user) {
+      //User.load(options, function (err, user) {
         if (err) { return done(err) }
         if (!user) {
-          return done(null, false, { message: 'Unknown user' })
+          return done(null, false, { message: 'Incorrect email' })
         }
+        if (user.hashed_password != password) {
+          return done(null, false, { message: 'Incorrect password' })
+          console.log("no pass match");
+        }
+        /*
         if (!user.authenticate(password)) {
           return done(null, false, { message: 'Invalid password' })
         }
-        return done(null, user)
-      })
+        */
+        return done(null, user);
+      });
     }
   ))
+
 }

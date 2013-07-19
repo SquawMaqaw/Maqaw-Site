@@ -13,11 +13,11 @@ var rootPath = path.resolve(__dirname + '../..')
 module.exports = {
   development: {
     root: rootPath,
-    db: 'mongodb://localhost/your_app_db_dev'
+    db: 'mongodb://localhost/testing'
   },
   test: {
     root: rootPath,
-    db: 'mongodb://localhost/your_app_db_test'
+    db: 'mongodb://localhost/testing'
   },
   staging: {
     root: rootPath,
