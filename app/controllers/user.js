@@ -11,7 +11,11 @@ exports.register = function (req, res) {
   var email = req.body.email,
       password = req.body.password;
 
-  var user = new User({ email: email, hashed_password: password});
+  var user = new User({ email: email });
+  var hashed_password = User.hash(password);
+  user.hashed_password = hashed_password;
+  console.log(hashed_password);
+
   user.save(function(err) {
     if (err) {
       res.send(500, "Registration failure");

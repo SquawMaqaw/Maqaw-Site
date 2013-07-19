@@ -5,7 +5,9 @@
 
 var mongoose = require('mongoose'),
     Schema = mongoose.Schema,
-    passportLocalMongoose = require('passport-local-mongoose');
+    passportLocalMongoose = require('passport-local-mongoose'),
+    bcrypt = require('bcrypt'),
+    SALT_WORK_FACTOR = 10;
 
 
 
@@ -14,10 +16,9 @@ var mongoose = require('mongoose'),
  */
 
 var UserSchema = new Schema({
-  name: { type: String, default: '' },
-  email: { type: String, default: '' },
-  hashed_password: { type: String, default: '' },
-  salt: { type: String, default: '' }
+  email: { type: String, default: '', required: true, index: { unique: true }},
+  company: { type: String, default: '' },
+  hashed_password: { type: String, default: '', required: true },
 })
 
 /**
@@ -28,12 +29,15 @@ UserSchema.plugin(passportLocalMongoose, {
   usernameField: 'email'
 });
 
-/**
- * Add your
- * - pre-save hooks
- * - validations
- * - virtuals
- */
+UserSchema.statics.hash = function(password) {
+  var salt = bcrypt.genSaltSync(10);
+  return bcrypt.hashSync(password, salt);
+};
+
+
+UserSchema.methods.authenticate = function(password) {
+  return bcrypt.compareSync(password, this.hashed_password);
+};
 
 /**
  * Methods

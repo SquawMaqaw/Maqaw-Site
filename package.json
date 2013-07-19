@@ -23,7 +23,7 @@
     "passport-local": "latest",
     "connect-mongo": "latest",
     "connect-flash": "latest",
-    "connect-ensure-login": "latest",
+    "bcrypt": "latest",
     "view-helpers": "latest",
     "jade": "latest",
     "async": "latest",
