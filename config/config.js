@@ -13,18 +13,18 @@ var rootPath = path.resolve(__dirname + '../..')
 module.exports = {
   development: {
     root: rootPath,
-    db: 'mongodb://localhost/testing'
+    db: 'mongodb://localhost/maqaw-site'
   },
   test: {
     root: rootPath,
-    db: 'mongodb://localhost/testing'
+    db: 'mongodb://localhost/maqaw-site'
   },
   staging: {
     root: rootPath,
-    db: process.env.MONGOHQ_URL
+    db: 'mongodb://localhost/maqaw-site'
   },
   production: {
     root: rootPath,
-    db: process.env.MONGOHQ_URL
+    db: 'mongodb://localhost/maqaw-site'
   }
 }
