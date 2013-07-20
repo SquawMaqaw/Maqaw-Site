@@ -21,6 +21,7 @@
     "mongoose-user": "latest",
     "passport": "latest",
     "passport-local": "latest",
+    "passport-local-mongoose": "latest",
     "connect-mongo": "latest",
     "connect-flash": "latest",
     "bcrypt": "latest",
