@@ -24,6 +24,11 @@ require('./config/passport')(passport, config)
 
 var app = express()
 
+//
+// serving minified javascript files //
+//
+app.use('/client', express.static(__dirname + '/client'));
+
 // Bootstrap application settings
 require('./config/express')(app, config, passport)
 
@@ -33,6 +38,7 @@ require('./config/routes')(app, passport)
 // Start the app by listening on <port>
 var port = process.env.PORT || 3001
 app.listen(port)
+
 console.log('Express app started on port '+port)
 
 // Expose app
