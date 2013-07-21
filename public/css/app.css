@@ -34,6 +34,12 @@ h3 {
   text-shadow: 2px 2px #333333;
 }
 
+h4 {
+  font-size: 14px;
+  color: #FFFFFF;
+  text-shadow: 2px 2px #333333;
+}
+
 header a {
   color: #FFFFFF;
   text-decoration: none;
@@ -70,4 +76,15 @@ input[type="submit"] {
 
 input[type="submit"]:hover {
   background-color: #95A5A6;
+}
+
+pre {
+  text-align: left;
+  border: 1px solid #CCCCCC;
+  background-color: #34495E;
+  padding: 10px;
+  color: #95A5A6;
+  margin: 10px;
+  white-space: pre-wrap;
+  line-height: 150%;
 }

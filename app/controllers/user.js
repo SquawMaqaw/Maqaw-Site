@@ -27,3 +27,8 @@ exports.login = passport.authenticate('local', {
     successRedirect: '/inside',
     failureRedirect: '/',
   });
+
+exports.index = function(req, res, next) {
+  console.log(req.user);
+  res.render('account/index', { key: 'sup' });
+}
