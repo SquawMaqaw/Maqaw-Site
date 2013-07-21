@@ -14,7 +14,6 @@ exports.register = function (req, res) {
   var user = new User({ email: email });
   var hashed_password = User.hash(password);
   user.hashed_password = hashed_password;
-  console.log(hashed_password);
 
   user.save(function(err) {
     if (err) {

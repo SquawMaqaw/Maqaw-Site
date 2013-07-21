@@ -26,7 +26,16 @@ module.exports = function (app, passport) {
 
   app.get('/inside', home.inside);
 
+  app.get('/users/register', function(req, res) {
+    res.render('account/register', { title: 'Register for a beta account' });
+  });
+
   app.post('/register', user.register);
+
+
+  app.get('/users/login', function(req, res) {
+    res.render('account/login');
+  });
 
   app.post('/login', user.login);
 
