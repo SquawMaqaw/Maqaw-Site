@@ -1,1 +1,8 @@
-a
+extends ../layouts/default
+
+block content
+  h3= 'Login to your account'
+  form(action='/login', method='post')
+    input(type='text', name='email', placeholder='Enter your email address')
+    input(type='password', name='password', placeholder='Enter your password')
+    input(type='submit', value='Login')
