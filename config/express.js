@@ -31,9 +31,6 @@ module.exports = function (app, config, passport) {
 
   app.set('showStackError', true)
 
-  // use express favicon
-  app.use(express.favicon())
-
   app.use(express.static(config.root + '/public'))
   app.use(express.logger('dev'))
 
