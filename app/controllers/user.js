@@ -8,23 +8,32 @@ var mongoose = require('mongoose'),
     User = mongoose.model('User');
 
 exports.register = function (req, res) {
-  var email = req.body.email,
+  var company = req.body.company, 
+      email = req.body.email,
       password = req.body.password,
       passwordConfirmation = req.body.password_confirmation;
 
-  if (password != passwordConfirmation) {
-    res.render('account/register', { title: 'Register for a beta account', error: 'Error: Passwords did not match.'})
+  if (!company) {
+    return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Enter in a company name' });
   }
 
-  var user = new User({ email: email });
+  if (!email) {
+    return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Enter your email address' });
+  }
+
+  if (password != passwordConfirmation) {
+    return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Passwords did not match.' });
+  }
+
+  var user = new User({ email: email, company: company });
   var hashed_password = User.hash(password);
   user.hashed_password = hashed_password;
 
   user.save(function(err) {
     if (err) {
-      res.send(500, "Registration failure");
+      return res.send(500, "Registration failure");
     }
-      res.redirect('/users/account')
+      return res.redirect('/users/account')
   });
 };
 
