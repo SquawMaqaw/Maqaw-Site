@@ -2,9 +2,9 @@ extends ../layouts/default
 
 block content
   h3= 'Sign up for a beta account!'
+  span.error= error
   form(action='/register', method='post')
-    input(type='text', name='email', placeholder="Enter your company's name")
     input(type='text', name='email', placeholder='Enter your email address')
     input(type='password', name='password', placeholder='Enter your password')
-    input(type='password', name='password-confirmation', placeholder='Enter your password again')
+    input(type='password', name='password_confirmation', placeholder='Enter your password again')
     input(type='submit', value='Register')

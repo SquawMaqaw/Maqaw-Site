@@ -33,11 +33,11 @@ module.exports = function (app, passport) {
 
 
   app.get('/users/login', function(req, res) {
-    res.render('account/login', { title: 'Login to your account' });
+    res.render('account/login', { title: 'Login to your account', messages: req.flash('info') });
   });
 
   app.post('/login', user.login);
 
-  app.get('/users/account', isLoggedIn, user.index);
+  app.get('/users/account', user.index);
 
 }
