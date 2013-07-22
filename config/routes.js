@@ -38,6 +38,6 @@ module.exports = function (app, passport) {
 
   app.post('/login', user.login);
 
-  app.get('/users/account', user.index);
+  app.get('/users/account', isLoggedIn, user.index);
 
 }
