@@ -27,7 +27,7 @@ var app = express()
 //
 // serving minified javascript files //
 //
-app.use('/client', express.static(__dirname + '/client'));
+app.use('/cdn', express.static(__dirname + '/public/cdn'));
 
 // Bootstrap application settings
 require('./config/express')(app, config, passport)
