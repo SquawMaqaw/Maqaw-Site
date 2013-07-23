@@ -44,5 +44,5 @@ exports.login = passport.authenticate('local', {
   });
 
 exports.index = function(req, res, next) {
-  res.render('account/index', { key: 'sup' });
+  res.render('account/index', { key: req.user._id, name: req.user.company });
 }
