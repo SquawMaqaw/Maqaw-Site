@@ -3,4 +3,4 @@ extends ../layouts/default
 block content
   h3= 'Add the Maqaw widget to your site!'
   h4= 'Paste the following code at the end of the <body></body> tags on each page you want the Maqaw widget to appear.'
-  pre= '<script type="text/javascript" href="http://cdn.maqaw.com/maqaw.min.js"></script>'
+  pre= '!-- Begin Maqaw Code --!<script type="text/javascript">var maqawOptions = { key: "' + key + '", name: "' + name + '"}</script><script type="text/javascript" src="http://www.maqaw.com/cdn/maqaw.min.js"></script>!-- End Maqaw Code --!'
