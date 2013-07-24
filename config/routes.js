@@ -31,7 +31,6 @@ module.exports = function (app, passport) {
 
   app.post('/register', user.register);
 
-
   app.get('/users/login', function(req, res) {
     res.render('account/login', { title: 'Login to your account', messages: req.flash('info') });
   });
