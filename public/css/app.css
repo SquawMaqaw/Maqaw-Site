@@ -89,7 +89,7 @@ pre {
   line-height: 150%;
 }
 
-span.error {
+span#error {
   color: #E00000;
   margin-bottom: 20px;
   display: block;
