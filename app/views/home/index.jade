@@ -12,10 +12,6 @@ html
 
     script(type="text/javascript")
       function afterSubmit() {
-        console.log("Submitted");
-      }
-
-      function onSubmit() {
         var form = document.getElementById("ss-form");
         form.innerHTML = "<span>We will send you instructions for setting up Maqaw!</span>";
       }
@@ -34,7 +30,7 @@ html
     #ss-form
       script(type="text/javascript")= 'var submitted = false;'
       iframe(name="hidden_iframe", id="hidden_iframe", style="display:none", onload="if(submitted){afterSubmit();}")
-      form(action="https://docs.google.com/forms/d/1juG2Di-dd7OoD6YDmMH53POOxqwZYGdsDgOEE8msCZA/formResponse", method="post", target="hidden_iframe", onsubmit="submitted=true; onSubmit();")
+      form(action="https://docs.google.com/forms/d/1juG2Di-dd7OoD6YDmMH53POOxqwZYGdsDgOEE8msCZA/formResponse", method="post", target="hidden_iframe", onsubmit="submitted=true;")
         input(type="text", name="entry.436015981", value="", placeholder="Enter your email address", id="entry_436015981", dir="auto")
         input(type="hidden", name="draftResponse", value="[]")
         input(type="hidden", name="pageHistory", value="0")
