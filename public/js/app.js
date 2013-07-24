@@ -30,9 +30,8 @@ $(function() {
       method: 'POST',
       data: querystring,
       success: function(data) {
-        console.log(data);
         $('#content').html(renderCodeLayout());
-        $('#code-snippet').text(renderCodeSnippet(12));
+        $('#code-snippet').text(renderCodeSnippet(data));
       },
       error: function(xhr, err) {
         $('#error').html("Error registering your account");
@@ -42,22 +41,27 @@ $(function() {
 
   // Login a user and render the code
   $('#login-submit').bind('click', function() {
+    e.preventDefault();
+    
     var paramsObj = {
       email: $('#login-email'),
       password: $('#login-password')
     };
 
-    console.log(paramsObj);
+    var querystring = decodeURIComponent($.param(paramsObj));
+
+    console.log(querystring);
 
     $.ajax({
       url: 'http://localhost:3000/login',
       method: 'POST',
-      data: encodeURIComponent(paramsObj),
+      data: querystring,
       success: function(data) {
-        $('#content').html('Success');
+        $('#content').html(renderCodeLayout());
+        $('#code-snippet').text(renderCodeSnippet(data));
       },
       error: function(data) {
-        $('#content').html('Error');
+        $('#error').html('Error logging into your account');
       }
     });
 
