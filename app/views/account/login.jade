@@ -2,7 +2,7 @@ extends ../layouts/default
 
 block content
   h3= 'Login to your account'
-  form(action='http://localhost:3000/login', method='post')
+  form
     input(id='login-email', type='text', name='email', placeholder='Enter your email address')
     input(id='login-password', type='password', name='password', placeholder='Enter your password')
     input(id='login-submit', type='submit', value='Login')

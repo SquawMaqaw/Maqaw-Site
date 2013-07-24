@@ -3,7 +3,7 @@ extends ../layouts/default
 block content
   h3= 'Sign up for a beta account!'
   span#error
-  form(action='http://localhost:3000/register', method='post')
+  form
     input(id='register-company', type='text', name='company', placeholder="Enter your company's name")
     input(id='register-email', type='text', name='email', placeholder='Enter your email address')
     input(id='register-password', type='password', name='password', placeholder='Enter your password')
