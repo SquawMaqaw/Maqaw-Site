@@ -26,7 +26,7 @@ $(function() {
     var querystring = decodeURIComponent($.param(paramsObj));
 
     $.ajax({
-      url: 'http://localhost:3000/register',
+      url: 'http://54.214.232.157:3000/register',
       method: 'POST',
       data: querystring,
       success: function(data) {
@@ -40,20 +40,18 @@ $(function() {
   });
 
   // Login a user and render the code
-  $('#login-submit').bind('click', function() {
+  $('#login-submit').bind('click', function(e) {
     e.preventDefault();
-    
+
     var paramsObj = {
-      email: $('#login-email'),
-      password: $('#login-password')
+      email: $('#login-email').val(),
+      password: $('#login-password').val()
     };
 
     var querystring = decodeURIComponent($.param(paramsObj));
 
-    console.log(querystring);
-
     $.ajax({
-      url: 'http://localhost:3000/login',
+      url: 'http://54.214.232.157:3000/login',
       method: 'POST',
       data: querystring,
       success: function(data) {
