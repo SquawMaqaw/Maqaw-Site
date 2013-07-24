@@ -37,28 +37,16 @@ exports.register = function (req, res) {
   });
 };
 
-/*
-exports.login = passport.authenticate('local', {
-    successRedirect: '/users/account',
-    failureRedirect: '/users/register',
-    failureFlash: 'Incorrect email or password'
-  });
-*/
 exports.login = function(req, res, next) {
-  console.log(req.headers.accept);
   passport.authenticate('local', function(err, user, info) {
     res.header('Access-Control-Allow-Origin', '*');
     if (err) return next(err);
     if (!user) {
-      console.log("Cannot find user");
       res.writeHead(401, { 'Content-type': 'application/json' });
       return res.json({ error: 'Email or password was incorrect' });
     }
-    console.log("Going to login the user");
     req.logIn(user, function(err) {
-      console.log("inside of the login func");
       if (err) return next(err);
-      //res.writeHead(200, { 'Content-type': 'application/json' });
       return res.json({ success: 'You successfully logged in' });
     });
   })(req, res, next);
