@@ -1,7 +1,7 @@
 $(function() {
 
   var renderCodeLayout = function() {
-    return '<h3>Add the Maqaw widget to your site</h3><h4>Paste the following code at the end of the <body></body> tags on each page you want the Maqaw widget to appear.</h4><pre id="code-snippet"></pre>';
+    return '<h3>Add the Maqaw widget to your site</h3><h4>Paste the following code at the end of the &lt;body&gt;&lt;/body&gt; tags on each page you want the Maqaw widget to appear.</h4><pre id="code-snippet"></pre>';
   }
 
   var renderCodeSnippet = function(id, name) {
