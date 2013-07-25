@@ -2,6 +2,7 @@ extends ../layouts/default
 
 block content
   h3= 'Login to your account'
+  span#error 
   form
     input(id='login-email', type='text', name='email', placeholder='Enter your email address')
     input(id='login-password', type='password', name='password', placeholder='Enter your password')
