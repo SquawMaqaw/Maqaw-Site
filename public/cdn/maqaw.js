@@ -78,6 +78,7 @@ function MaqawLoginPage(manager) {
     var emailField = document.createElement("input");
     emailField.setAttribute('type', "text");
     emailField.setAttribute('name', "email");
+    emailField.setAttribute('id', "maqaw-login-user-field")
     emailField.setAttribute('size', "31");
     emailField.setAttribute('placeholder', 'email');
     //emailField.value = email;
