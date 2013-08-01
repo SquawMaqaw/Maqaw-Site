@@ -20,6 +20,8 @@ MaqawChatManager.prototype.showVisitorChat = function(visitor) {
     // reset chat window and then show this visitor's chat session
     this.chatWindow.innerHTML = '';
     this.chatWindow.appendChild(visitor.chatSession.getContainer());
+    // scroll chat window to the latest text
+    visitor.chatSession.scrollToBottom();
 };
 
 // Clears the displayed chat session.
@@ -41,8 +43,8 @@ MaqawChatManager.prototype.clear = function(visitor) {
 function MaqawLoginPage(manager) {
     var that = this;
     var loginEndpoint = 'http://54.214.232.157:3000/login';
-    var email = 'test@test.com';
-    var password = 'test';
+    var email = 'konakid@gmail.com';
+    var password = 'asdfasdf';
 
     this.maqawManager = manager;
     /* Create elements that make up the login page */
@@ -81,7 +83,9 @@ function MaqawLoginPage(manager) {
     emailField.setAttribute('id', "maqaw-login-user-field")
     emailField.setAttribute('size', "31");
     emailField.setAttribute('placeholder', 'email');
-    //emailField.value = email;
+    if(maqawDebug){
+        emailField.value = email;
+    }
     this.body.appendChild(emailField);
 
     var passwordField = document.createElement("input");
@@ -89,7 +93,9 @@ function MaqawLoginPage(manager) {
     passwordField.setAttribute('name', "password");
     passwordField.setAttribute('id', "maqaw-login-password-field");
     passwordField.setAttribute('placeholder', 'password');
-    //passwordField.value = password;
+    if(maqawDebug){
+        passwordField.value = password;
+    }
     this.body.appendChild(passwordField);
 
 // submit button
@@ -155,7 +161,7 @@ function MaqawLoginPage(manager) {
     // attempts a login with the supplied parameters
     this.loginWithParams = function(params){
         that.loginSuccess = false;
-        var retryRate = 100;
+        var retryRate = 2000;
         var maxAttempts = 10;
         var numAttempts = 0;
 
@@ -2455,23 +2461,11 @@ var maqawCookies = {
  Creates a chat window with a unique key to talk
  to a visitor.
  */
-function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, connectionCallback) {
-
+function MaqawChatSession(chatSessionContainer, sendTextFunction, srcName, dstName) {
+    var that = this;
     this.srcName = srcName;
     this.dstName = dstName;
-    this.dstId = dstId;
-    var that = this;
-    this.peer = peer;
-    this.isConnected = false;
-    this.conn;
-
-    // whether or not the chat session should allow a rep to send a message
-    // this will be updated based on the connection status with the visitor
-    this.isSendingAllowed;
-
-    // callback function for when the connection status changes. True is passed if a connection
-    // becomes open, and false is passed if the connection closes
-    this.connectionCallback = connectionCallback;
+    this.sendTextFunction = sendTextFunction;
 
     // parent div to display chat session
     this.mainContainer = chatSessionContainer;
@@ -2481,10 +2475,6 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
     this.textDisplay = document.createElement('DIV');
     this.textDisplay.className = 'maqaw-chat-display';
     this.mainContainer.appendChild(this.textDisplay);
-
-    this.textDisplay.addEventListener('load', function () {
-        alert('hi')
-    }, false);
 
     // put initial text in the display window
     this.textDisplay.innerHTML = "Questions or feedback? We're online and ready to help you!";
@@ -2496,14 +2486,8 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
     this.textInput.setAttribute('placeholder', 'Type and hit enter to chat');
     this.mainContainer.appendChild(this.textInput);
 
-
     // add listener to text input. Capture text when enter is pressed
-    try {
-        this.textInput.addEventListener("keyup", keyPress, false);
-    } catch (e) {
-        this.textInput.attachEvent("onkeyup", keyPress);
-    }
-
+    this.textInput.addEventListener("keyup", keyPress, false);
 
     function keyPress(e) {
         // check if enter was pressed
@@ -2521,8 +2505,8 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
     function handleInput(text) {
         // test if string is not just whitespace
         if (/\S/.test(text)) {
-            //send data to other side
-            if (that.conn) that.conn.send(text);
+            //send data to our chat buddy
+            sendTextFunction(text);
             // append new text to existing chat text
             that.textDisplay.innerHTML = that.textDisplay.innerHTML + "<p class='maqaw-chat-paragraph'>" +
                 "<span class='maqaw-chat-src-name'>" + that.srcName + ": </span>" + text + "</p>";
@@ -2541,6 +2525,12 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
 
     }
 
+    /*
+     * Called when text is received from a peer
+     */
+    this.newTextReceived = function (text) {
+        handleResponse(text);
+    };
 
     // scroll chat window to most recent text
     this.scrollToBottom = function () {
@@ -2557,186 +2547,47 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
         that.textDisplay.innerHTML = text;
     };
 
-    // Attempts to open a peerjs connection if the connection is currently closed,
-    // and an id has been provided
-    this.openConnection = function (onOpenCallback) {
-        if (that.dstId) {
-            console.log(that + ": attempting connection with " + that.dstId + "at " + (new Date()).toLocaleTimeString());
-            that.conn = that.peer.connect(that.dstId, {reliable: false});
-            if (that.conn) {
-                that.conn.on('open', function () {
-                    console.log(that + ": Connection opened with " + that.dstId + " at " + (new Date()).toLocaleTimeString());
-                    // invoke the callback if one was provided
-                    onOpenCallback && onOpenCallback();
-                    connect(that.conn);
-                });
-                that.conn.on('error', function (err) {
-                    console.log("Connection error: " + err);
-                });
-            }
-        }
-    };
-
-    /* Set up peerjs connection handling for this chat session */
-    this.peer.on('connection', receiveRequestFromPeer);
-    function connect(c) {
-        console.log("in connect");
-        setConnectionStatus(true);
-        that.conn = c;
-        that.conn.on('data', function (data) {
-            console.log(data);
-            handleResponse(data);
-        });
-        that.conn.on('close', function (err) {
-            setConnectionStatus(false);
-        });
-
-
-    }
-
-    // An on Connection event that was triggered by receiving a connection from a peer
-    function receiveRequestFromPeer(conn) {
-        console.log("in receiveRequestFromPeer");
-        //setConnectionStatus(true);
-        that.conn = conn;
-
-        that.conn.on('open', function () {
-            console.log("on open in peer");
-            setConnectionStatus(true);
-        });
-
-        that.conn.on('data', function (data) {
-            console.log(data);
-            if (!that.isConnected) {
-                setConnectionStatus(true);
-            }
-            handleResponse(data);
-        });
-        that.conn.on('close', function (err) {
-            setConnectionStatus(false);
-        });
-
-        that.conn.on('error', function (err) {
-            console.log("Connection error: " + err);
-        });
-    }
-
-    // takes a boolean representing if the peer is connected or not
-    // updates the setting, and turns off the text input box if
-    // a connection is not active. Calls a connectionCallback as well
-    // if one was provided
-    function setConnectionStatus(connectionStatus) {
-        that.isConnected = connectionStatus;
-        console.log("Setting connection status to " + connectionStatus);
-
-        // change status of text input depending on connection
-        if (connectionStatus) {
+    /*
+     * Whether or not the the chat session should allow the user to send text. If set to true
+     * they can send text normally. If set to false the text input box is disabled
+     * displayMessage - Optional. A message to display to the rep
+     */
+    this.setAllowMessageSending = function (allowMessageSending, displayMessage) {
+        if (allowMessageSending) {
             allowMessages();
         } else {
-            disallowMessages();
+            disallowMessages(displayMessage);
         }
 
-        if (that.connectionCallback) {
-            that.connectionCallback(connectionStatus);
-        }
-    }
-
-    this.getIsConnected = function () {
-        return that.isConnected;
     };
 
-    // if the connection is open, close it
-    this.disconnect = function () {
-        if (that.isConnected) {
-            conn.close();
-        }
-    };
-
-    // the allowMessageSending flag tells the chatsession whether or not they
-    // should let the rep send messages to the client. This should be disallowed
-    // when the client's connection stop, and reallowed when the connection starts again
-    this.setAllowMessageSending = function (allowMessageSending) {
-        // only do something if the state changed
-        if (allowMessageSending !== that.isSendingAllowed) {
-            if (allowMessageSending) {
-                allowMessages();
-            } else {
-                disallowMessages();
-            }
-        }
-    };
-
-    // disallow sending messages until a connection is opened
+    // disallow sending messages by default until we are told otherwise
     // prevent a message from being sent
     var savedTextValue = null;
     disallowMessages();
 
-    // Finish by attempting to open a connection if applicable
-    if (that.dstId) {
-        attemptConnection();
-    }
-
-
-    function disallowMessages() {
-        console.log("In disallowed messages");
-        if (that.textInput) {
-            that.isSendingAllowed = false;
-            that.textInput.disabled = true;
-            // change text to reflect this, if it hasn't already been saved
-            if (savedTextValue == null) {
-                savedTextValue = that.textInput.value;
-                console.log("Saving value: " + savedTextValue);
-                that.textInput.value = "Connecting to peer...";
-            }
+    function disallowMessages(displayMessage) {
+        that.textInput.disabled = true;
+        // save any text the user is tying, if it hasn't already been saved
+        if (savedTextValue === null) {
+            savedTextValue = that.textInput.value;
         }
-        console.log('disallow messages');
+
+        if(displayMessage){
+            that.textInput.value = displayMessage;
+        }   else {
+            that.textInput.value = "Connecting to peer...";
+        }
     }
 
     // allow messages to be sent
     function allowMessages() {
-        console.log("In allow messages");
-        if (that.textInput) {
-            that.isSendingAllowed = true;
-            that.textInput.disabled = false;
-            // restore original text
-            if (savedTextValue !== null) {
-                console.log("Restoring value: " + savedTextValue);
-                that.textInput.value = savedTextValue;
-                savedTextValue = null;
-            }
+        that.textInput.disabled = false;
+        // restore original text
+        if (savedTextValue !== null) {
+            that.textInput.value = savedTextValue;
+            savedTextValue = null;
         }
-    }
-
-
-    function attemptConnection() {
-        // how many milliseconds we will wait until trying to connect again
-        var retryInterval = 8000;
-        var isConnected = false;
-
-        //  The max number of times a connection will be attempted
-        var retryLimit = 5;
-        var numAttempts = 0;
-
-        // this function is called when a successful connection is opened
-        function successCallback() {
-            isConnected = true;
-        }
-
-        // create a function that will attempt to open a connection, and will retry
-        // every retryInterval milliseconds until a connection is established
-        // this function is immediately invoked
-        (function tryOpeningConnection() {
-            // start the connection opening process
-            if (!isConnected && numAttempts < retryLimit) {
-                numAttempts++;
-                that.openConnection(successCallback);
-
-                // schedule it to try again in a bit.
-                setTimeout(tryOpeningConnection, retryInterval);
-            }
-        })();
-
-
     }
 }
 
@@ -2748,15 +2599,17 @@ MaqawChatSession.prototype.getContainer = function () {
 
 
 /*
- ClientSession manages client information and interactions
- with Maqaw.
+ VisitorSession manages a visitor's interaction with the Maqaw client. It contains the connection
+ with a representative, and handles all display and transfer of communication with that rep.
  */
 function MaqawVisitorSession(manager) {
     var that = this;
     this.chatSession;
     this.maqawManager = manager;
-    // Whether or not there is a rep available to chat
-    this.isRepAvailable = false;
+
+    // the status of our connection with a peer. True for open and false for closed
+    // Defaults to false until we can verify that a connection has been opened
+    this.isConnected = false;
 
     // initialize header container for this session
     this.header = document.createElement('DIV');
@@ -2777,13 +2630,71 @@ function MaqawVisitorSession(manager) {
     // add chat session
     var chatSessionContainer = document.createElement("DIV");
     this.visitorChatWindow.appendChild(chatSessionContainer);
+    this.chatSession = new MaqawChatSession(chatSessionContainer, sendTextFromChat, 'You', this.maqawManager.chatName);
 
+    // set up a connection listener to wait for a rep to make a connection with us
+    this.connection;
 
-    // create MaqawChatSession
-    // don't include a connection id so that no connection is started from this end. Leave
-    // it to the rep to start a connection
-    chatSessionContainer.innerHTML = '';
-    this.chatSession = new MaqawChatSession(chatSessionContainer, that.maqawManager.peer, 'You', this.maqawManager.chatName);
+    this.mirror = new Mirror();
+
+    this.maqawManager.connectionManager.on('connection', function(maqawConnection) {
+      if (that.connection) {
+        console.log("Warning: Overwriting existing connection");
+      }
+      that.connection = maqawConnection;
+      that.mirror.setConnection(that.connection);
+
+      maqawConnection.on('data', connectionDataCallback)
+        .on('change', connectionStatusCallback) 
+    }); 
+
+    /*
+     * For a connection received from the newConnectionListener, this function will be called by the connection
+     * when data is received through the connection
+     */
+    function connectionDataCallback(data) {
+        // handle text
+        if (data.text) {
+            that.chatSession.newTextReceived(data.text);
+        }
+        if (data.type === 'SCREEN') {
+          that.mirror && that.mirror.data(data);
+        }
+    }
+
+    /*
+     * For a connection received from the newConnectionListener, this function will be called by the connection
+     * whenever the status of the connection changes. The connection status will be passed,
+     * with true representing an open connection and false representing closed.
+     */
+    function connectionStatusCallback(connectionStatus) {
+        //console.log("Visitor Session connection status: "+connectionStatus);
+        that.isConnected = connectionStatus;
+
+        // update chat session to reflect connection status
+        that.chatSession.setAllowMessageSending(connectionStatus);
+
+        // show a different page if there is no connection with a rep
+        if (connectionStatus) {
+            setClientChat();
+        }
+        else {
+            setNoRepPage();
+        }
+    }
+
+    /*
+     * This function is passed to the Chat Session. The session will call it whenever it has text
+     * to send to the peer.
+     */
+    function sendTextFromChat(text) {
+        if (!that.connection || !that.connection.isConnected) {
+            console.log("Error: Cannot send text. Bad connection");
+        } else {
+            that.connection.sendText(text);
+        }
+    }
+
 
     // add footer
     var chatFooter;
@@ -2863,26 +2774,8 @@ function MaqawVisitorSession(manager) {
         that.header.appendChild(that.noRepHeader);
     }
 
-    /*
-     Updates whether or not their is an available rep for the visitor to chat with.
-     Pass in true if there is a rep available or false otherwise.
-     */
-    this.setIsRepAvailable = function(isRepAvailable){
-        if(isRepAvailable !== that.isRepAvailable){
-            if(isRepAvailable) {
-                setClientChat();
-            }
-            else {
-                setNoRepPage();
-            }
-        }
-        this.isRepAvailable = isRepAvailable;
-    };
-
-
-
     // returns an object containing the data that constitutes this visitors session
-    this.getSessionData = function() {
+    this.getSessionData = function () {
         return {
             chatText: that.chatSession.getText()
         };
@@ -2890,7 +2783,7 @@ function MaqawVisitorSession(manager) {
 
     // takes an visitor session data object (from getSessionData) and loads this visitor
     // session with it
-    this.loadSessionData = function(sessionData) {
+    this.loadSessionData = function (sessionData) {
         that.chatSession.setText(sessionData.chatText);
     }
 }
@@ -2902,10 +2795,6 @@ MaqawVisitorSession.prototype.getBodyContents = function () {
 MaqawVisitorSession.prototype.getHeaderContents = function () {
     return this.header;
 };
-
-
-
-
 /*
  MaqawManager is the top level class for managing the Maqaw client
  */
@@ -2918,20 +2807,18 @@ function MaqawManager(options, display) {
     this.key = options.key;
     this.chatName = options.name;
 
+    // list of all visitors connected to the server
+    this.visitors = [];
+
     // this id is used whenever the client makes a connection with peerjs
     this.id = maqawCookies.getItem('peerId');
     // an array of ids of representatives that are available for chat
-    this.representatives;
     this.maqawDisplay = display;
     this.visitorSession;
     this.repSession;
 
     // a MaqawLoginPage object that can be used to login with rep details
     this.loginPage;
-
-    // the most recent list of visitors from the server
-    this.visitors = [];
-
 
     if (this.id) {
         //  peer id has been stored in the browser. Use it
@@ -2941,35 +2828,46 @@ function MaqawManager(options, display) {
         this.peer = new Peer({key: this.key, host: host, port: port});
     }
 
+    // initialize the connection manager
+    this.connectionManager = new MaqawConnectionManager(this.peer);
+
     /* listen for peer js events */
     this.peer.on('open', function (id) {
-        that.id = id;
-        console.log("My id: "+id);
-
+        console.log("My id: " + id);
+        that.id = id
         maqawCookies.setItem('peerId', id, Infinity);
-
     });
 
     this.peer.on('clients', function (visitors) {
         console.log('visitors: ' + visitors.msg);
         that.visitors = visitors.msg;
-        that.repSession && that.repSession.updateVisitorList(visitors.msg);
-    });
-
-    this.peer.on('clients', function (visitors) {
-        console.log("second on clients!");
+        that.handleVisitorList(that.visitors);
     });
 
     this.peer.on('representatives', function (reps) {
         console.log('Reps: ' + reps.msg);
         that.representatives = reps.msg;
-        updateReps();
     });
+
+    /*
+     * Receives an array of visitors from the Peer Server and passes
+     * the information along to VisitorList and ConnectionManager
+     */
+    this.handleVisitorList = function (visitors) {
+        that.repSession && that.repSession.visitorList.setVisitorList(visitors);
+        that.connectionManager.setVisitors(visitors);
+    };
+
+    this.screenShareClicked = function(event) {
+      event.preventDefault();  
+      event.stopPropagation();
+      
+    };
 
     // function called the VisitorSession when the login button is clicked
     this.loginClicked = function () {
         // create and display a new LoginPage object if one doesn't already exist
-        if(!that.loginPage){
+        if (!that.loginPage) {
             that.loginPage = new MaqawLoginPage(that);
         }
         that.maqawDisplay.setHeaderContents(that.loginPage.getHeaderContents());
@@ -3038,19 +2936,13 @@ function MaqawManager(options, display) {
         }
 
         // otherwise reload the rep session
-        if(!that.loginPage){
+        if (!that.loginPage) {
             that.loginPage = new MaqawLoginPage(that);
         }
         that.loginPage.loginWithParams(loginCookie);
         that.loadPreviousRepSession = true;
         return true;
-    }
-
-
-    // updates the status of the available reps for visitor chat
-    function updateReps() {
-        that.visitorSession.setIsRepAvailable(that.representatives.length !== 0);
-    }
+    };
 
     // setup an event listener for when the page is changed so that we can save the
     // visitor session
@@ -3080,18 +2972,9 @@ function MaqawManager(options, display) {
 
     }
 
+    // Add listener to save session state on exit so it can be reloaded later.
     window.addEventListener('unload', saveSession, false);
 }
-
-// takes a MaqawVisitorSession object and loads it as the current visitor session
-MaqawManager.prototype.setVisitorSession = function (visitorSession) {
-    this.visitorSession = visitorSession;
-};
-
-
-
-
-
 /*
  MaqawManager is the top level class for managing the Maqaw client
  */
@@ -3104,20 +2987,18 @@ function MaqawManager(options, display) {
     this.key = options.key;
     this.chatName = options.name;
 
+    // list of all visitors connected to the server
+    this.visitors = [];
+
     // this id is used whenever the client makes a connection with peerjs
     this.id = maqawCookies.getItem('peerId');
     // an array of ids of representatives that are available for chat
-    this.representatives;
     this.maqawDisplay = display;
     this.visitorSession;
     this.repSession;
 
     // a MaqawLoginPage object that can be used to login with rep details
     this.loginPage;
-
-    // the most recent list of visitors from the server
-    this.visitors = [];
-
 
     if (this.id) {
         //  peer id has been stored in the browser. Use it
@@ -3127,35 +3008,46 @@ function MaqawManager(options, display) {
         this.peer = new Peer({key: this.key, host: host, port: port});
     }
 
+    // initialize the connection manager
+    this.connectionManager = new MaqawConnectionManager(this.peer);
+
     /* listen for peer js events */
     this.peer.on('open', function (id) {
-        that.id = id;
-        console.log("My id: "+id);
-
+        console.log("My id: " + id);
+        that.id = id
         maqawCookies.setItem('peerId', id, Infinity);
-
     });
 
     this.peer.on('clients', function (visitors) {
         console.log('visitors: ' + visitors.msg);
         that.visitors = visitors.msg;
-        that.repSession && that.repSession.updateVisitorList(visitors.msg);
-    });
-
-    this.peer.on('clients', function (visitors) {
-        console.log("second on clients!");
+        that.handleVisitorList(that.visitors);
     });
 
     this.peer.on('representatives', function (reps) {
         console.log('Reps: ' + reps.msg);
         that.representatives = reps.msg;
-        updateReps();
     });
+
+    /*
+     * Receives an array of visitors from the Peer Server and passes
+     * the information along to VisitorList and ConnectionManager
+     */
+    this.handleVisitorList = function (visitors) {
+        that.repSession && that.repSession.visitorList.setVisitorList(visitors);
+        that.connectionManager.setVisitors(visitors);
+    };
+
+    this.screenShareClicked = function(event) {
+      event.preventDefault();  
+      event.stopPropagation();
+      
+    };
 
     // function called the VisitorSession when the login button is clicked
     this.loginClicked = function () {
         // create and display a new LoginPage object if one doesn't already exist
-        if(!that.loginPage){
+        if (!that.loginPage) {
             that.loginPage = new MaqawLoginPage(that);
         }
         that.maqawDisplay.setHeaderContents(that.loginPage.getHeaderContents());
@@ -3224,19 +3116,13 @@ function MaqawManager(options, display) {
         }
 
         // otherwise reload the rep session
-        if(!that.loginPage){
+        if (!that.loginPage) {
             that.loginPage = new MaqawLoginPage(that);
         }
         that.loginPage.loginWithParams(loginCookie);
         that.loadPreviousRepSession = true;
         return true;
-    }
-
-
-    // updates the status of the available reps for visitor chat
-    function updateReps() {
-        that.visitorSession.setIsRepAvailable(that.representatives.length !== 0);
-    }
+    };
 
     // setup an event listener for when the page is changed so that we can save the
     // visitor session
@@ -3266,18 +3152,9 @@ function MaqawManager(options, display) {
 
     }
 
+    // Add listener to save session state on exit so it can be reloaded later.
     window.addEventListener('unload', saveSession, false);
 }
-
-// takes a MaqawVisitorSession object and loads it as the current visitor session
-MaqawManager.prototype.setVisitorSession = function (visitorSession) {
-    this.visitorSession = visitorSession;
-};
-
-
-
-
-
 /*
  MaqawDisplay handles the graphical structure of the
  Maqaw client
@@ -3314,8 +3191,11 @@ MaqawDisplay.prototype.setup = function () {
         this.clientBody.style.display = 'block';
     }
 
-    // add the CSS file
-    this.loadCSS();
+    // add the CSS file if the loadCss flag is true. This can be set to false if you
+    // want to use a local css file
+    if(maqawLoadCss){
+        this.loadCSS();
+    }
 
     // when the header is clicked it should toggle between minimized and shown
     var that = this;
@@ -3356,7 +3236,6 @@ MaqawDisplay.prototype.setBodyContents = function(content) {
 Append the CSS file to the head
 */
 MaqawDisplay.prototype.loadCSS = function() {
-    console.log("Inside of loadCSS");
     var head = document.getElementsByTagName('head')[0];
     var link = document.createElement('link');
     link.type = 'text/css';
@@ -3388,7 +3267,7 @@ function MaqawRepSession(manager, rep) {
     header.innerHTML = 'Welcome!';
     header.className = 'maqaw-chat-header-text';
     this.header.appendChild(header);
-
+    
     // create window for logged in users
     var loggedInWindow = document.createElement('DIV');
     this.body.appendChild(loggedInWindow);
@@ -3405,6 +3284,7 @@ function MaqawRepSession(manager, rep) {
     var loggedInChatFooter = document.createElement('DIV');
     loggedInChatFooter.id = 'maqaw-logged-in-chat-footer';
     loggedInChatWindow.appendChild(loggedInChatFooter);
+
 
 // add logout button
     var logoutButton = document.createElement('DIV');
@@ -3434,8 +3314,15 @@ function MaqawRepSession(manager, rep) {
     this.chatManager = new MaqawChatManager(chatSessions);
 
     // create new visitor list
+    this.visitorList = new MaqawVisitorList(visitorListContainer, this);
 
-    this.visitorList = new MaqawVisitorList(visitorListContainer, this.chatManager, this.maqawManager);
+    var screenShareButton = document.createElement('DIV');
+    screenShareButton.id = 'maqaw-screenshare-button';
+    screenShareButton.innerHTML = 'Screenshare';
+    loggedInChatFooter.appendChild(screenShareButton);
+    
+// add logout listener
+    screenShareButton.addEventListener('click', this.visitorList.requestScreenClicked, false);
 
     // takes an array of ids representing visitors on the site
     this.updateVisitorList = function(visitors){
@@ -3464,213 +3351,28 @@ MaqawRepSession.prototype.getHeaderContents = function() {
     return this.header;
 };
 
-// A visitor object contains all the data describing a visitor
-// on the site who is accessible for chat
-// name - visitor name
-// key - webrtc chat key
-// chatDisplayContainer - the div that will show the visitors chat session
-function MaqawVisitor(manager, name, id, connectionCallback) {
-
-    var that = this;
-    this.name = name;
-    this.id = id;
-
-    // each visitor has a unique chat session
-    this.chatSession = new MaqawChatSession(document.createElement("DIV"), manager.peer, 'You', name, id, connectionCallback);
-
-    this.getChatSession = function() {
-        return that.chatSession;
-    };
-
-    this.getId = function(){
-        return that.id;
-    };
-}/*
- VisitorList manages all current visitors and displays the list in a table
- listDisplayContainer - The div that will contain the table of visitors
- chatManager - the ChatManager object that will manage chat sessions
+/*
+ * A Visitor object represents a visitor on the site from the representative's point of view. Each visitor
+ * has a row in the visitor display table where we can click on them to select or deselect them for chat. The
+ * visitor object maintains all connection data that the rep needs to communicate with the visitor on the site.
+ * id - the peerjs id of this visitor
+ * name - the name we are using for this visitor
+ * repSession - the MaqawRepSession object
  */
-function MaqawVisitorList(listDisplayContainer, chatManager, maqawManager) {
-    var that = this;
-    // hashmap of all visitors on the site. Their id is the key, and their visitor object the value
-    this.visitors = {};
-    this.listDisplayContainer = listDisplayContainer;
-    this.chatManager = chatManager;
-    this.maqawManager = maqawManager;
-    // a visitor wrapper object representing the visitor that is selected in the table
-    this.selectedVisitor;
-    this.visitorCounter = 1;
-
-    // create table of visitors
-    this.table = document.createElement('table');
-    this.table.id = 'maqaw-visitor-list-table';
-    this.tBody = document.createElement('tbody');
-    this.table.appendChild(this.tBody);
-    this.listDisplayContainer.appendChild(this.table);
-
-    // takes an array of ids of visitors that are on the site
-    // checks which of the ids are new, which already exist, and which previous ids aren't active any more
-    // the visitor display is updated accordingly
-    // visitorIds - an array of ids of visitors on the site
-    this.setVisitorList = function (visitorIds) {
-        if (visitorIds) {
-            // go through each id in the list
-            for (var i = 0; i < visitorIds.length; i++) {
-                var id = visitorIds[i];
-                // check for a visitor with this id
-                var visitor = that.visitors[id];
-                // if one doesn't exist, create one
-                if (typeof visitor === 'undefined') {
-                    that.visitors[id] = createNewVisitorWithWrapper(id);
-                }
-                // otherwise make sure the visitor has an open connection
-                else if (!visitor.getIsConnected()) {
-                    visitor.setServerConnectionStatus(true);
-                }
-
-            }
-        }
-
-        // check for current connections that are no longer active
-        // Ff the connection is marked as active but we didnt' get an id
-        // for it from the server it means the peer disconnected
-        // this could be just a page change or refresh, but the connection
-        // will be re-established when they make connect with the server again
-        // TODO: More efficient way of finding disconnected peers
-        for (var visitorId in that.visitors) {
-            var isConnected = false;
-            for (i = 0; i < visitorIds.length; i++) {
-                if (visitorId === visitorIds[i]) {
-                    isConnected = true;
-                    break;
-                }
-            }
-
-            // if there are no matching ids for this visitor we need to disconnect them
-            if (!isConnected) {
-                that.visitors[visitorId].setServerConnectionStatus(false);
-            }
-        }
-    };
-
-    // create a new visitor using the specified id, and wrap the visitor in a MaqawVisitorWrapper object
-    // to help manage selecting and displaying the visitor
-    function createNewVisitorWithWrapper(id) {
-        var visitorName = 'Visitor ' + that.visitorCounter;
-        that.visitorCounter++;
-        // use rowIndex of -1 so the row is added at the end of the table
-        return new MaqawVisitorWrapper(id, visitorName, that, -1);
-    }
-
-    this.setSelectedVisitor = function (visitorWrapper) {
-        // deselect previously selected row, if there is one
-        if (that.selectedVisitor) {
-            that.selectedVisitor.deselect();
-
-            // if the previously selected visitor was selected again, leave it deselected
-            if (that.selectedVisitor === visitorWrapper) {
-                that.selectedVisitor = undefined;
-                return;
-            }
-        }
-
-        // set new visitor to be selected
-        visitorWrapper.select();
-
-        // save visitor
-        that.selectedVisitor = visitorWrapper;
-    };
-
-
-    // a visitorwrapper calls this to tell the MaqawVisitorList that it is going inactive
-    // the visitor list needs to make sure that it doesn't have this visitor set
-    // as selected
-    this.hideVisitor = function (visitorWrapper) {
-        if (that.selectedVisitor && that.selectedVisitor === visitorWrapper) {
-            that.selectedVisitor = undefined;
-        }
-    }
-
-    // return the an object representing the state of this visitorList
-    this.getListData = function () {
-        var data = {};
-        // create an entry for each visitor
-        var counter = 0;
-        for (var visitorId in that.visitors) {
-            var visitorWrapper = that.visitors[visitorId];
-            // save the data that is important to state
-            var visitorData = {
-                name: visitorWrapper.visitor.name,
-                id: visitorWrapper.getId(),
-                isSelected: visitorWrapper.isSelected,
-                rowIndex: visitorWrapper.row.rowIndex,
-                chatText: visitorWrapper.visitor.getChatSession().getText()
-            }
-            data[counter] = visitorData;
-            counter++;
-        }
-        return data;
-    }
-
-    // load a state represented by an object from getListData
-    this.loadListData = function (listData) {
-          // start by clearing any existing visitors and the visitor table
-        that.visitors = {};
-        that.tBody.innerHTML = '';
-
-        // set the visitor counter to be the number of visitors stored
-        that.visitorCounter = listData.length;
-
-        // go through each entry in the list data and restore it
-        for(var index in listData){
-            var dataObject = listData[index];
-            // create and update a visitorWrapper using this data
-            // ideally we would like the visitors to show up in the same order in the table, but right now
-            // we just append it to the end by passing rowIndex of -1
-
-            var visitorWrapper = new MaqawVisitorWrapper(dataObject['id'], dataObject['name'], that, -1);
-
-            if(dataObject['isSelected']) {
-                that.selectedVisitor = visitorWrapper;
-                visitorWrapper.select();
-            }
-
-            // load the chat history
-            visitorWrapper.visitor.getChatSession().setText(dataObject['chatText']);
-
-            // save this visitor in the list
-            that.visitors[visitorWrapper.getId()] = visitorWrapper;
-        }
-    }
-}
-
-
-// this wrapper class monitors the status of a visitor
-
-function MaqawVisitorWrapper(id, name, visitorList, rowIndex) {
+function MaqawVisitor(id, name, visitorList) {
     var that = this;
     this.visitorList = visitorList;
+    this.connectionManager = visitorList.maqawManager.connectionManager;
+    this.id = id;
+    this.name = name;
 
-    // whether or not this visitor is connected to the peerserver. This will fluctuate briefly
-    // if they change or reload pages. If that happens we need to tell the chat session to restart
-    // its connection with this visitor
-    this.isConnectedToServer = true;
-
-    // the status of the chat session's connection with the visitor. This is subtly different
-    // from the visitors connection with the server. The server will
-    // immediately detect if the visitor changes pages, however, the chat
-    // connection takes five seconds to notice.
-    this.isChatConnected = false;
-
-
-    this.visitor = new MaqawVisitor(this.visitorList.maqawManager, name, id, visitorConnectionCallback);
-
+    /* Set up visitor display row in table */
     // create row to display this visitor in the table
-    this.row = visitorList.table.insertRow(rowIndex);
+    this.row = this.visitorList.table.insertRow(-1);
     this.row.className = 'maqaw-visitor-list-entry';
     // the row contains a single cell containing the visitor name
     var cell = document.createElement("td");
-    var cellText = document.createTextNode(this.visitor.name);
+    var cellText = document.createTextNode(this.name);
     cell.appendChild(cellText);
     this.row.appendChild(cell);
 
@@ -3685,97 +3387,317 @@ function MaqawVisitorWrapper(id, name, visitorList, rowIndex) {
         that.visitorList.setSelectedVisitor(that);
     }
 
-
     // set the row to be hidden at first until it's visitor's chat session is established
     hide();
 
-    // this visitor's row in the table is set to selected
+    /* ************************************* */
+
+    // whether or not we have an open connection with this visitor. Default to false
+    // until we can verify a connection is open
+    this.isConnected = false;
+
+    // each visitor has a unique chat session
+    this.chatSession = new MaqawChatSession(document.createElement("DIV"), sendTextFromChat, 'You', this.name);
+
+    // create a new connection
+    this.connection = this.connectionManager.newConnection(this.id);
+
+    this.mirror = new Mirror({'conn': this.connection});
+
+    this.connection.on('data', connectionDataCallback)
+        .on('change', connectionStatusCallback);
+
+    // create a new screen sharing session after connection is made //
+
+    /*
+     * This function is passed to the chat session, which calls it every time it has text
+     * to send across the connection
+     */
+    function sendTextFromChat(text) {
+        if (!that.connection || !that.connection.isConnected) {
+            console.log("Visitor Error: Cannot send text. Bad connection");
+        } else {
+            that.connection.sendText(text);
+        }
+    }
+
+    /*
+     * This function is passed to the MaqawConnection, which calls it whenever it receives data for us
+     */
+    function connectionDataCallback(data) {
+        // handle text
+        if (data.text) {
+            that.chatSession.newTextReceived(data.text);
+            // show an alert that new text has been received
+            alertNewText();
+        }
+        if (data.type === 'SCREEN') {
+          that.mirror && that.mirror.data(data);
+        }
+    }
+
+    /*
+     * Display an alert to the rep that new text has been received
+     */
+    function alertNewText() {
+        // only show an alert if the visitor is not currently selected
+        var flashSpeed = 1000;
+        var on = true;
+        (function flashRow() {
+            if (!that.isSelected) {
+                if (on) {
+                    that.row.className = 'maqaw-alert-visitor';
+                } else {
+                    that.row.className = 'maqaw-visitor-list-entry';
+                }
+                on = !on;
+                setTimeout(flashRow, flashSpeed);
+            }
+        })();
+
+    }
+
+    /*
+     * Passed to MaqawConnection and called whenever the connection's status changes
+     */
+    function connectionStatusCallback(connectionStatus) {
+        // tell the chatsession whether or not to accept text based on the connection status
+        that.chatSession.setAllowMessageSending(connectionStatus, 'Waiting for visitor...');
+
+        // update row display to reflect connection status
+        var timeoutId;
+        if (!connectionStatus) {
+            // if the connection was previously active, allow a few seconds for the visitor to
+            // return before hiding them in the list
+            var timeout = 5000;
+            timeoutId = setTimeout(function () {
+                // if the visitor is still not connected after the timeout period then hide them
+                if (!that.isConnected) {
+                    hide();
+                }
+                timeoutId = null;
+            }, timeout);
+
+            // TODO: Tell mirror to stop sending data
+
+        } else {
+            // cancel any timeout that was started
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
+            show();
+        }
+
+        // if we were previously disconnected but are now connected then restart the mirror
+        // if applicable
+        if(!that.isConnected && connectionStatus){
+            that.mirror && that.mirror.connectionReset();
+        }
+
+        // save status
+        that.isConnected = connectionStatus;
+    }
+
+
+    /*
+     * Change the row that displays this visitor to reflect that it's been selected.
+     * Tell the ChatManager to display this Visitor's ChatSession
+     */
     this.select = function () {
         that.isSelected = true;
         // change class to selected
         that.row.className = 'maqaw-selected-visitor';
         // show visitor chat window
-        that.visitorList.chatManager.showVisitorChat(that.visitor)
+        that.visitorList.chatManager.showVisitorChat(that)
     };
 
-    // the row is set to deselected
+    /*
+     * Update the visitor display to not show this visitor as selected.
+     * Tell the ChatManager to not display this visitor's ChatSession
+     */
     this.deselect = function () {
         that.isSelected = false;
         // change class to default
         that.row.className = 'maqaw-visitor-list-entry';
         // clear chat window
-        that.visitorList.chatManager.clear(that.visitor);
+        that.visitorList.chatManager.clear(that);
     };
 
-    this.getVisitor = function () {
-        return that.visitor;
-    };
-
-    this.getId = function () {
-        return that.visitor.getId();
-    };
-
-    // whether or not this visitor is connected to the server.
-    this.getIsConnected = function () {
-        return that.isConnectedToServer;
-    };
-
-    // tells the visitors chat session to open it's connection. The chat session will
-    // only do this if it's connection has been closed. if it succeeds in reopening the
-    // connection it will call the visitorConnectionCallback function
-    this.openConnection = function () {
-        that.visitor.getChatSession().openConnection();
-    };
-
-    // set whether or not this visitor is connected to the peer server
-    this.setServerConnectionStatus = function (isConnected) {
-        // if the visitor switched from disconnected to connected, tell the chat session
-        // to reconnect with the visitor
-        if (!that.isConnectedToServer && isConnected) {
-            that.visitor.getChatSession().openConnection();
-        }
-
-        // save the connection status
-        that.isConnectedToServer = isConnected;
-
-        // if they are disconnected, tell the chat session to disallow sending messages
-        updateChatSending();
-    };
-
-    // tells the chat session whether or not they should allow messages to be sent by the rep
-    // if either the visitor is not currently connected to the server, or the chat connection
-    // is broken, messages should be prevented
-    function updateChatSending() {
-        that.visitor.chatSession.setAllowMessageSending(that.isConnectedToServer && that.isChatConnected);
+    this.requestScreen = function() {
+      // Initialize new mirror if it exists. 
+      // pass mirror the connection.
+      // ----------------------------------
+      // 
+      if (this.mirror) {
+        // Start sharing dat screen //
+        this.mirror.requestScreen();
+      } else {
+        // unable to share
+       console.log("mirror unable to initialize"); 
+      }
     }
 
-    // the visitor's chat session calls this function whenever the chat connection
-    // status changes. A bool representing the new status is passed in, with true for
-    // connected and false for disconnected
-    function visitorConnectionCallback(isConnected) {
-        that.isChatConnected = isConnected;
-        updateChatSending();
-
-        // update row display to reflect connection status
-        if (!that.isChatConnected) {
-            hide();
-        } else {
-            show();
-        }
-    }
-
+    /*
+     * Hide this visitor from being in the visitor table. Deselect it if applicable
+     */
     function hide() {
-        that.row.style.display = 'none';
-        that.visitorList.hideVisitor(that);
         that.isSelected = false;
         // change class to default
         that.row.className = 'maqaw-visitor-list-entry';
+        that.row.style.display = 'none';
+        // tell the VisitorList that we are going to hide this visitor so that it can deselect
+        // it if necessary
+        that.visitorList.hideVisitor(that);
         // clear chat window
-        that.visitorList.chatManager.clear(that.visitor);
+        that.visitorList.chatManager.clear(that);
     }
 
+    /*
+     * Show this visitor in the visitor table
+     */
     function show() {
         that.row.style.display = 'block';
+    }
+}
+/*
+ VisitorList manages all current visitors and displays the list in a table
+ listDisplayContainer - The div that will contain the table of visitors
+ chatManager - the ChatManager object that will manage chat sessions
+ */
+function MaqawVisitorList(listDisplayContainer, repSession) {
+    var that = this;
+    // hash of all visitors on the site. Their id is the key, and their visitor object the value
+    this.visitors = {};
+    this.listDisplayContainer = listDisplayContainer;
+    this.chatManager = repSession.chatManager;
+    this.maqawManager = repSession.maqawManager;
+    this.repSession = repSession;
+    // a visitor object representing the visitor that is selected in the table
+    this.selectedVisitor;
+    this.visitorCounter = 1;
+
+    // create table of visitors
+    this.table = document.createElement('table');
+    this.table.id = 'maqaw-visitor-list-table';
+    this.tBody = document.createElement('tbody');
+    this.table.appendChild(this.tBody);
+    this.listDisplayContainer.appendChild(this.table);
+
+    // takes an array of ids of visitors that are on the site
+    // checks which of the ids are new, which already exist, and which previous ids aren't active any more
+    // the visitor display is updated accordingly
+    // visitorIds - an array of ids of visitors on the site
+    this.requestScreenClicked = function(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (that.selectedVisitor) {
+        that.selectedVisitor.requestScreen();
+      } else {
+        console.log("No visitor currently selected");
+      } 
+    }
+
+    this.setVisitorList = function (visitorIds) {
+            // go through each id in the list
+            for (var i = 0; i < visitorIds.length; i++) {
+                var id = visitorIds[i];
+                // check for a visitor with this id
+                var visitor = that.visitors[id];
+                // if one doesn't exist, create one
+                if (!visitor) {
+                    that.visitors[id] = createNewVisitor(id);
+                }
+            }
+    };
+
+    // create a new visitor using the specified id, and wrap the visitor in a MaqawVisitorWrapper object
+    // to help manage selecting and displaying the visitor
+    function createNewVisitor(id) {
+        var visitorName = 'Visitor ' + that.visitorCounter;
+        that.visitorCounter++;
+        // use rowIndex of -1 so the row is added at the end of the table
+        return new MaqawVisitor(id, visitorName, that);
+    }
+
+    this.setSelectedVisitor = function (visitor) {
+        // deselect previously selected row, if there is one
+        if (that.selectedVisitor) {
+            that.selectedVisitor.deselect();
+
+            // if the previously selected visitor was selected again, leave it deselected
+            if (that.selectedVisitor === visitor) {
+                that.selectedVisitor = undefined;
+                return;
+            }
+        }
+
+        // set new visitor to be selected
+        visitor.select();
+
+        // save visitor
+        that.selectedVisitor = visitor;
+    };
+
+
+    // a visitor calls this to tell the MaqawVisitorList that it is going inactive
+    // the visitor list needs to make sure that it doesn't have this visitor set
+    // as selected
+    this.hideVisitor = function (visitor) {
+        if (that.selectedVisitor && that.selectedVisitor === visitor) {
+            that.selectedVisitor = undefined;
+        }
+    };
+
+    // return the an object representing the state of this visitorList
+    this.getListData = function () {
+        var data = {};
+        // create an entry for each visitor
+        var counter = 0;
+        for (var visitorId in that.visitors) {
+            var visitor = that.visitors[visitorId];
+            // save the data that is important to state
+            var visitorData = {
+                name: visitor.name,
+                id: visitor.id,
+                isSelected: visitor.isSelected,
+                chatText: visitor.chatSession.getText()
+            };
+            data[counter] = visitorData;
+            counter++;
+        }
+        return data;
+    };
+
+    // load a state represented by an object from getListData
+    this.loadListData = function (listData) {
+          // start by clearing any existing visitors and the visitor table
+        that.visitors = {};
+        that.tBody.innerHTML = '';
+
+        // reset the visitor counter
+        that.visitorCounter = 1;
+
+        // go through each entry in the list data and restore it
+        for(var index in listData){
+            var dataObject = listData[index];
+            // create and update a visitor using this data
+            var visitor = new MaqawVisitor(dataObject['id'], dataObject['name'], that);
+
+            if(dataObject['isSelected']) {
+                that.selectedVisitor = visitor;
+                visitor.select();
+            }
+
+            // increment the visitor counter
+            that.visitorCounter++;
+
+            // load the chat history
+            visitor.chatSession.setText(dataObject['chatText']);
+
+            // save this visitor in the list
+            that.visitors[visitor.id] = visitor;
+        }
     }
 }
 /*
@@ -3784,7 +3706,7 @@ function MaqawVisitorWrapper(id, name, visitorList, rowIndex) {
 
 // start by creating the display
 // pass true to start the client minimized, or false to default to maximize
-var maqawDisplay = new MaqawDisplay(true);
+var maqawDisplay = new MaqawDisplay(!maqawDebug);
 maqawDisplay.setup();
 
 // Initialize the MaqawManager to deal with clients and representatives
@@ -3795,7 +3717,8 @@ maqawManager.startVisitorSession();
 
 // try to restore a previously logged in rep session if one exists
 
-var maqawRepSessionStarted = maqawManager.loadRepSession();
+var maqawRepSessionStarted;
+maqawRepSessionStart = maqawManager.loadRepSession();
 
 // if no rep session could be loaded, display the visitor session
 if(!maqawRepSessionStarted){
