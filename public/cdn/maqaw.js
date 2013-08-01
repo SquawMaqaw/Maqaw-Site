@@ -1,3 +1,2357 @@
+var DATA_ENUMS = {
+  SHARE_SCREEN: 0, 
+  SHARE_SCREEN_OK: 1,
+  SHARE_SCREEN_REFUSE: 2,
+  SCREEN_DATA: 3,
+  MOUSE_MOVE: 4,
+  MOUSE_CLICK: 5,
+  SCROLL: 6
+};
+
+function Mirror(options) {
+  // stores connection object if exists
+  this.conn = options && options.conn;
+  this.base;
+
+  this.mirrorDocument;
+  this.mirrorWindow;
+  this.mouseMirror;
+
+    // whether or not we are currently viewing our peer's screen
+    this.isViewingScreen = false;
+}
+
+/*
+ * Called when the connection to our peer is reset
+ */
+Mirror.prototype.connectionReset = function () {
+   // if we were watching our peer's screen, tell that to start sending screen
+   //data again
+    if(this.mirrorWindow && !this.mirrorWindow.closed){
+        this.requestScreen();
+    }
+};
+
+Mirror.prototype.data = function(_data) {
+  //
+  // handle new data. For a new share screen
+  // request, function opens a new mirror
+  // for all other requests, function passes
+  // data to mirrorScreen
+  //
+  switch(_data.request) {
+    case DATA_ENUMS.SHARE_SCREEN: 
+      // Request from peer to view this screen  
+      this.conn.send({ type: 'SCREEN', request: DATA_ENUMS.SHARE_SCREEN_OK });
+      this.shareScreen();
+      break;
+    case DATA_ENUMS.SHARE_SCREEN_OK:
+      //  Share screen request received and 
+      //  validated open a screen mirror 
+      this.openMirror();
+      break;
+    case DATA_ENUMS.SCREEN_DATA:
+      //  Screen Data.
+    case DATA_ENUMS.MOUSE_MOVE:
+      // Mouse move event
+    case DATA_ENUMS.MOUSE_CLICK:
+      // TODO: Trigger some sort of fake mouse click. (could be a UI event or something more complicated)
+      this.mirrorScreen(_data);  
+      break;
+    case DATA_ENUMS.SCROLL:
+      this.mirrorWindow.scrollTo(_data.left, _data.top);
+      break;
+    default:
+      // Unknown
+      break;
+  }
+};
+
+Mirror.prototype.openMirror = function() {
+  var _this = this;
+
+  // if we are already viewing the screen, don't open a new window
+    if(!this.isViewingScreen) {
+         this.mirrorWindow = window.open();
+         this.mirrorDocument = this.mirrorWindow.document;
+
+        // attach a listener for if the window is closed
+        this.mirrorWindow.addEventListener('unload', function() {
+            // TODO: implement me
+            this.isViewingScreen = false;
+        }, false);
+    }
+
+    this.isViewingScreen = true;
+
+
+  this._mirror = new TreeMirror(this.mirrorDocument, {
+    createElement: function(tagName) {
+      if (tagName == 'SCRIPT') {
+        var node = _this.mirrorDocument.createElement('NO-SCRIPT');
+        node.style.display = 'none';
+        return node;
+      }
+
+      if (tagName == 'HEAD') {
+        var node = _this.mirrorDocument.createElement('HEAD');
+        node.appendChild(_this.mirrorDocument.createElement('BASE'));
+        node.firstChild.href = _this.base;
+        return node;
+      }
+    }
+  });
+  
+  this.mouseMirror = new MouseMirror(this.mirrorDocument, {
+    mousemove: function(event) {
+      _this.conn.send({
+        type: 'SCREEN',
+        request: DATA_ENUMS.MOUSE_MOVE,
+        coords: {x: event.pageX, y: event.pageY}
+      });
+    }, 
+    click: function(event) {
+        _this.conn.send({
+            type: 'SCREEN',
+            request: DATA_ENUMS.MOUSE_CLICK,
+            coords: {x: event.pageX, y: event.pageY}
+        });
+    }
+  }); 
+};
+
+Mirror.prototype.setConnection = function(conn) {
+  // set a connection if established later
+  this.conn = conn;
+};
+
+Mirror.prototype.requestScreen = function() {
+  //
+  //  Sends share screen request to peer
+  //
+  if (this.conn) {
+    this.conn.send({ 
+      type: 'SCREEN', 
+      request: DATA_ENUMS.SHARE_SCREEN 
+    });
+  }
+};
+
+Mirror.prototype.shareScreen = function() {
+  //
+  // streams screen to peer
+  //
+  var _this = this;
+  if (this.conn) {
+
+    this.conn.send({
+      type: 'SCREEN',
+      request: DATA_ENUMS.SCREEN_DATA,
+      clear: true 
+    });
+
+    this.conn.send({
+      type: 'SCREEN',
+      request: DATA_ENUMS.SCREEN_DATA,
+      base: location.href.match(/^(.*\/)[^\/]*$/)[1] 
+    });
+
+    var mirrorClient = new TreeMirrorClient(document, {
+
+      initialize: function(rootId, children) {
+        _this.conn.send({
+          type: 'SCREEN',
+          request: DATA_ENUMS.SCREEN_DATA,
+          f: 'initialize',
+          args: [rootId, children]
+        });
+      },
+
+      applyChanged: function(removed, addedOrMoved, attributes, text) {
+        _this.conn.send({
+          type: 'SCREEN',
+          request: DATA_ENUMS.SCREEN_DATA,
+          f: 'applyChanged',
+          args: [removed, addedOrMoved, attributes, text]
+        });
+      }
+    });
+
+    this.mouseMirror = new MouseMirror(document, {
+      mousemove: function(event) {
+        _this.conn.send({ 
+          type: 'SCREEN', 
+          request: DATA_ENUMS.MOUSE_MOVE,
+          coords: {x: event.pageX, y: event.pageY}
+        });
+      }, 
+      click: function(event) {
+          _this.conn.send({
+              type: 'SCREEN',
+              request: DATA_ENUMS.MOUSE_CLICK,
+              coords: {x: event.pageX, y: event.pageY}
+          });
+      }
+    });
+  
+    // Set up scroll listener
+    function scrollListener(){
+      var top = window.pageYOffset;
+      var left = window.pageXOffset;
+      _this.conn.send({
+        type: 'SCREEN',
+        request: DATA_ENUMS.SCROLL,
+        top: top,
+        left: left
+      });
+    }
+
+    window.addEventListener('scroll', scrollListener, false);
+  } else {
+    console.log("Error: Connection not established. Unable to stream screen");
+  }
+};
+
+Mirror.prototype.mirrorScreen = function(data) {
+  var _this = this;
+
+  function clearPage() {
+    // clear page //
+    while (_this.mirrorDocument.firstChild) {
+      _this.mirrorDocument.removeChild(_this.mirrorDocument.firstChild);
+    }
+  }
+
+  function handleMessage(msg) {
+    if (msg.clear)
+      clearPage();
+    else if (msg.base)
+      _this.base = msg.base;
+    else if (msg.request === DATA_ENUMS.SCREEN_DATA) 
+      _this._mirror[msg.f].apply(_this._mirror, msg.args);
+    else if (msg.request === DATA_ENUMS.MOUSE_MOVE || msg.request === DATA_ENUMS.MOUSE_CLICK)
+      _this.mouseMirror.data(msg);
+  }
+
+  var msg = data;
+  if (msg instanceof Array) {
+    msg.forEach(function(subMessage) {
+      handleMessage(JSON.parse(subMessage));
+    });
+  } else {
+    handleMessage(msg);
+  }
+};
+
+function MouseMirror(doc, options) {
+  this.CURSOR_RADIUS = 10;
+  this.moveEvent = options.mousemove;
+  this.clickEvent = options.click;
+  this.doc = doc;
+  var _this = this;
+
+  this.cursor = this.doc.createElement('div'); 
+  this.cursor.style.width = 2*this.CURSOR_RADIUS + 'px';
+  this.cursor.style.height = 2*this.CURSOR_RADIUS + 'px';
+  this.cursor.style.backgroundColor = 'red';
+  this.cursor.style.borderRadius = '999px';
+  this.cursor.style.zIndex = 10000;
+  this.cursor.style.position = 'absolute';
+  this.cursor.style.top = '0px';
+  this.cursor.style.left = '0px';
+  this.cursor.setAttribute("ignore", "true");
+
+    // maximum number of times per second mouse movement data will be sent
+    var MAX_SEND_RATE = 10;
+    // has enough time elapsed to send data again?
+    var isMouseTimeUp = true;
+    function moveMouse(event){
+      if(isMouseTimeUp){
+          _this.moveEvent(event);
+          isMouseTimeUp = false;
+          setTimeout(function(){isMouseTimeUp = true;}, 1000 / MAX_SEND_RATE);
+      }
+    }
+
+
+  this.doc.addEventListener('mousemove', moveMouse, false);
+  this.doc.addEventListener('click', this.clickEvent, false);
+
+
+  this.isDrawn = false;
+
+  return this;
+}
+
+MouseMirror.prototype.data = function(_data) {
+
+  if (!this.isDrawn) {
+    //  Hack that appends cursor only  
+    //  once a document.body exists
+    if (this.doc.body) {
+      this.doc.body.appendChild(this.cursor);
+      this.isDrawn = true;
+    }
+  }
+
+  if (_data.request === DATA_ENUMS.MOUSE_MOVE) {
+    this.moveMouse(_data);
+  } else if (_data.request === DATA_ENUMS.MOUSE_CLICK) {
+    this.clickMouse(_data);
+  } 
+};
+
+MouseMirror.prototype.moveMouse = function(_data) {
+  this.cursor.style.top = _data.coords.y - this.CURSOR_RADIUS + 'px';
+  this.cursor.style.left = _data.coords.x - this.CURSOR_RADIUS + 'px';
+};
+
+MouseMirror.prototype.clickMouse = function(_data) {
+    var x = _data.coords.x;
+    var y = _data.coords.y;
+    var _this = this;
+
+    function makeExpandingRing(){
+        var radius = 1;
+        var click = _this.doc.createElement('div');
+        click.style.width = 2*radius + 'px';
+        click.style.height = 2*radius + 'px';
+        click.style.backgroundColor = 'transparent';
+        click.style.border = '2px solid rgba(255, 255, 0, 1)';
+        click.style.borderRadius = '999px';
+        click.style.zIndex = 10000;
+        click.style.position = 'absolute';
+        click.style.top = y - radius + 'px';
+        click.style.left = x - radius + 'px';
+        click.setAttribute("ignore", "true");
+        _this.doc.body.appendChild(click);
+
+        var rate = 50;
+        var radiusIncrease = 2;
+        var transparency = 1;
+        var transparencyRate = .03;
+
+        (function expand() {
+            radius += radiusIncrease;
+            transparency -= transparencyRate;
+            click.style.border = '2px solid rgba(255, 255, 0, ' + transparency + ')';
+            click.style.width = 2*radius + 'px';
+            click.style.height = 2*radius + 'px';
+            click.style.top = y - radius + 'px';
+            click.style.left = x - radius + 'px';
+
+            if(transparency > 0){
+                setTimeout(expand, rate);
+            } else {
+                _this.doc.body.removeChild(click);
+            }
+        })();
+    }
+
+    var numRings = 6;
+    var ringSpacing = 300;
+    var ringCounter = 0;
+
+    (function doRings (){
+        if(ringCounter < numRings){
+            makeExpandingRing();
+            ringCounter++;
+            setTimeout(doRings, ringSpacing);
+        }
+    })();
+
+
+};
+
+MouseMirror.prototype.off = function() {
+  this.doc.removeEventListener('mousemove', this.moveEvent, false);
+  this.doc.removeEventListener('click', this.clickEvent, false);
+};
+// Copyright 2011 Google Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+function TreeMirror(root, delegate) {
+  this.root = root;
+  this.idMap = {};
+  this.delegate = delegate;
+}
+
+TreeMirror.prototype = {
+  initialize: function(rootId, children) {
+    this.idMap[rootId] = this.root;
+
+    for (var i = 0; i < children.length; i++)
+      this.deserializeNode(children[i], this.root);
+  },
+
+  deserializeNode: function(nodeData, parent) {
+    if (nodeData === null)
+      return null;
+
+    if (typeof nodeData == 'number')
+      return this.idMap[nodeData];
+
+    var doc = this.root; //instanceof HTMLDocument ? this.root : this.root.ownerDocument;
+
+    var node;
+    switch(nodeData.nodeType) {
+      case Node.COMMENT_NODE:
+        node = doc.createComment(nodeData.textContent);
+        break;
+
+      case Node.TEXT_NODE:
+        node = doc.createTextNode(nodeData.textContent);
+        break;
+
+      case Node.DOCUMENT_TYPE_NODE:
+        node = doc.implementation.createDocumentType(nodeData.name, nodeData.publicId, nodeData.systemId);
+        break;
+
+      case Node.ELEMENT_NODE:
+        //  Check if node has ignore attribute  if so, do not render. //
+        if (nodeData.attributes && nodeData.attributes["ignore"])
+          return;
+
+        if (this.delegate && this.delegate.createElement)
+          node = this.delegate.createElement(nodeData.tagName);
+        if (!node)
+          node = doc.createElement(nodeData.tagName);
+
+        Object.keys(nodeData.attributes).forEach(function(name) {
+          if (!this.delegate ||
+              !this.delegate.setAttribute ||
+              !this.delegate.setAttribute(node, name, nodeData.attributes[name])) {
+            node.setAttribute(name, nodeData.attributes[name]);
+          }
+        }, this);
+
+        break;
+    }
+
+    this.idMap[nodeData.id] = node;
+
+    if (parent)
+      parent.appendChild(node);
+
+    if (nodeData.childNodes) {
+      for (var i = 0; i < nodeData.childNodes.length; i++)
+        this.deserializeNode(nodeData.childNodes[i], node);
+    }
+
+    return node;
+  },
+
+  applyChanged: function(removed, addedOrMoved, attributes, text) {
+    function removeNode(node) {
+      if (node.parentNode)
+        node.parentNode.removeChild(node);
+    }
+
+    function moveOrInsertNode(data) {
+      var parent = data.parentNode;
+      var previous = data.previousSibling;
+      var node = data.node;
+
+      parent.insertBefore(node, previous ? previous.nextSibling : parent.firstChild);
+    }
+
+    function updateAttributes(data) {
+      var node = this.deserializeNode(data.node);
+      Object.keys(data.attributes).forEach(function(attrName) {
+        var newVal = data.attributes[attrName];
+        if (newVal === null) {
+          node.removeAttribute(attrName);
+        } else {
+          if (!this.delegate ||
+              !this.delegate.setAttribute ||
+              !this.delegate.setAttribute(node, attrName, newVal)) {
+            node.setAttribute(attrName, newVal);
+          }
+        }
+      }, this);
+    }
+
+    function updateText(data) {
+      var node = this.deserializeNode(data.node);
+      node.textContent = data.textContent;
+    }
+
+    addedOrMoved.forEach(function(data) {
+      data.node = this.deserializeNode(data.node);
+      data.previousSibling = this.deserializeNode(data.previousSibling);
+      data.parentNode = this.deserializeNode(data.parentNode);
+
+      // NOTE: Applying the changes can result in an attempting to add a child
+      // to a parent which is presently an ancestor of the parent. This can occur
+      // based on random ordering of moves. The way we handle this is to first
+      // remove all changed nodes from their parents, then apply.
+      removeNode(data.node);
+    }, this);
+
+    removed.map(this.deserializeNode, this).forEach(removeNode);
+    addedOrMoved.forEach(moveOrInsertNode);
+    attributes.forEach(updateAttributes, this);
+    text.forEach(updateText, this);
+
+    removed.forEach(function(id) {
+      delete this.idMap[id]
+    }, this);
+  }
+}
+
+function TreeMirrorClient(target, mirror, testingQueries) {
+  this.target = target;
+  this.mirror = mirror;
+  this.knownNodes = new MutationSummary.NodeMap;
+
+  var rootId = this.serializeNode(target).id;
+  var children = [];
+  for (var child = target.firstChild; child; child = child.nextSibling)
+    children.push(this.serializeNode(child, true));
+
+  this.mirror.initialize(rootId, children);
+
+  var self = this;
+
+  var queries = [{ all: true }];
+
+  if (testingQueries)
+    queries = queries.concat(testingQueries);
+
+  this.mutationSummary = new MutationSummary({
+    rootNode: target,
+    callback: function(summaries) {
+      self.applyChanged(summaries);
+    },
+    queries: queries
+  });
+}
+
+TreeMirrorClient.prototype = {
+  nextId: 1,
+
+  disconnect: function() {
+    if (this.mutationSummary) {
+      this.mutationSummary.disconnect();
+      this.mutationSummary = undefined;
+    }
+  },
+
+  rememberNode: function(node) {
+    var id = this.nextId++;
+    this.knownNodes.set(node, id);
+    return id;
+  },
+
+  forgetNode: function(node) {
+    delete this.knownNodes.delete(node);
+  },
+
+  serializeNode: function(node, recursive) {
+    if (node === null)
+      return null;
+
+    var id = this.knownNodes.get(node);
+    if (id !== undefined) {
+      return id;
+    }
+
+    var data = {
+      nodeType: node.nodeType,
+      id: this.rememberNode(node)
+    };
+
+    switch(data.nodeType) {
+      case Node.DOCUMENT_TYPE_NODE:
+        data.name = node.name;
+        data.publicId = node.publicId;
+        data.systemId = node.systemId;
+        break;
+
+      case Node.COMMENT_NODE:
+      case Node.TEXT_NODE:
+        data.textContent = node.textContent;
+        break;
+
+      case Node.ELEMENT_NODE:
+        data.tagName = node.tagName;
+        data.attributes = {};
+        for (var i = 0; i < node.attributes.length; i++) {
+          var attr = node.attributes.item(i);
+          data.attributes[attr.name] = attr.value;
+        }
+
+        if (recursive && node.childNodes.length) {
+          data.childNodes = [];
+
+          for (var child = node.firstChild; child; child = child.nextSibling)
+            data.childNodes.push(this.serializeNode(child, true));
+        }
+        break;
+    }
+
+    return data;
+  },
+
+  serializeAddedAndMoved: function(changed) {
+    var all = changed.added.concat(changed.reparented).concat(changed.reordered);
+
+    var parentMap = new MutationSummary.NodeMap;
+    all.forEach(function(node) {
+      var parent = node.parentNode;
+      var children = parentMap.get(parent)
+      if (!children) {
+        children = new MutationSummary.NodeMap;
+        parentMap.set(parent, children);
+      }
+
+      children.set(node, true);
+    });
+
+    var moved = [];
+
+    parentMap.keys().forEach(function(parent) {
+      var children = parentMap.get(parent);
+
+      var keys = children.keys();
+      while (keys.length) {
+        var node = keys[0];
+        while (node.previousSibling && children.has(node.previousSibling))
+          node = node.previousSibling;
+
+        while (node && children.has(node)) {
+          moved.push({
+            node: this.serializeNode(node),
+            previousSibling: this.serializeNode(node.previousSibling),
+            parentNode: this.serializeNode(node.parentNode)
+          });
+
+          children.delete(node);
+          node = node.nextSibling;
+        }
+
+        var keys = children.keys();
+      }
+    }, this);
+
+    return moved;
+  },
+
+  serializeAttributeChanges: function(attributeChanged) {
+    var map = new MutationSummary.NodeMap;
+
+    Object.keys(attributeChanged).forEach(function(attrName) {
+      attributeChanged[attrName].forEach(function(element) {
+        var record = map.get(element);
+        if (!record) {
+          record = {
+            node: this.serializeNode(element),
+            attributes: {}
+          };
+          map.set(element, record);
+        }
+
+        record.attributes[attrName] = element.getAttribute(attrName);
+      }, this);
+    }, this);
+
+    return map.keys().map(function(element) {
+      return map.get(element);
+    });
+  },
+
+  serializeCharacterDataChange: function(node) {
+    return {
+      node: this.serializeNode(node),
+      textContent: node.textContent
+    }
+  },
+
+  applyChanged: function(summaries) {
+    var changed = summaries[0]
+    var removed = changed.removed.map(this.serializeNode, this);
+    var moved = this.serializeAddedAndMoved(changed);
+    var attributes = this.serializeAttributeChanges(changed.attributeChanged);
+    var text = changed.characterDataChanged.map(this.serializeCharacterDataChange, this);
+
+    this.mirror.applyChanged(removed, moved, attributes, text);
+
+    changed.removed.forEach(this.forgetNode, this);
+  }
+}
+// Copyright 2011 Google Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+(function(global) {
+  "use strict";
+
+  var matchesSelector = 'matchesSelector';
+  if ('webkitMatchesSelector' in Element.prototype)
+    matchesSelector = 'webkitMatchesSelector';
+  else if ('mozMatchesSelector' in Element.prototype)
+    matchesSelector = 'mozMatchesSelector';
+
+  var MutationObserver = global.MutationObserver || global.WebKitMutationObserver || global.MozMutationObserver;
+  if (MutationObserver === undefined) {
+    console.log('MutationSummary cannot load: DOM Mutation Observers are required.');
+    console.log('https://developer.mozilla.org/en-US/docs/DOM/MutationObserver');
+    return;
+  }
+
+  // NodeMap UtilityClass. Exposed as MutationSummary.NodeMap.
+  // TODO(rafaelw): Consider using Harmony Map when available.
+
+  var ID_PROP = '__mutation_summary_node_map_id__';
+  var nextId_ = 1;
+
+  function ensureId(node) {
+    if (!node[ID_PROP]) {
+      node[ID_PROP] = nextId_++;
+      return true;
+    }
+
+    return false;
+  }
+
+  function NodeMap() {
+    this.map_ = {};
+  };
+
+  NodeMap.prototype = {
+    set: function(node, value) {
+      ensureId(node);
+      this.map_[node[ID_PROP]] = {k: node, v: value};
+    },
+    get: function(node) {
+      if (ensureId(node))
+        return;
+      var byId = this.map_[node[ID_PROP]];
+      if (byId)
+        return byId.v;
+    },
+    has: function(node) {
+      return !ensureId(node) && node[ID_PROP] in this.map_;
+    },
+    'delete': function(node) {
+      if (ensureId(node))
+        return;
+      delete this.map_[node[ID_PROP]];
+    },
+    keys: function() {
+      var nodes = [];
+      for (var id in this.map_) {
+        nodes.push(this.map_[id].k);
+      }
+      return nodes;
+    }
+  };
+
+  function hasOwnProperty(obj, propName) {
+    return Object.prototype.hasOwnProperty.call(obj, propName);
+  }
+
+  // Reachability & Matchability changeType constants.
+  var STAYED_OUT = 0;
+  var ENTERED = 1;
+  var STAYED_IN = 2;
+  var EXITED = 3;
+
+  // Sub-states of STAYED_IN
+  var REPARENTED = 4;
+  var REORDERED = 5;
+
+  /**
+   * This is no longer in use, but conceptually it still represents the policy for
+   * reporting node movement:
+   *
+   *  var reachableMatchableProduct = [
+   *  //  STAYED_OUT,  ENTERED,     STAYED_IN,   EXITED
+   *    [ STAYED_OUT,  STAYED_OUT,  STAYED_OUT,  STAYED_OUT ], // STAYED_OUT
+   *    [ STAYED_OUT,  ENTERED,     ENTERED,     STAYED_OUT ], // ENTERED
+   *    [ STAYED_OUT,  ENTERED,     STAYED_IN,   EXITED     ], // STAYED_IN
+   *    [ STAYED_OUT,  STAYED_OUT,  EXITED,      EXITED     ]  // EXITED
+   *  ];
+   */
+
+  function enteredOrExited(changeType) {
+    return changeType == ENTERED || changeType == EXITED;
+  }
+
+  var forEach = Array.prototype.forEach.call.bind(Array.prototype.forEach);
+
+  function MutationProjection(rootNode, elementFilter, calcReordered, calcOldPreviousSibling) {
+    this.rootNode = rootNode;
+    this.elementFilter = elementFilter;
+    this.calcReordered = calcReordered;
+    this.calcOldPreviousSibling = calcOldPreviousSibling;
+  }
+
+  MutationProjection.prototype = {
+
+    getChange: function(node) {
+      var change = this.changeMap.get(node);
+      if (!change) {
+        change = {
+          target: node
+        };
+        this.changeMap.set(node, change);
+      }
+
+      if (node.nodeType == Node.ELEMENT_NODE)
+        change.matchCaseInsensitive = node instanceof HTMLElement && node.ownerDocument instanceof HTMLDocument;
+
+      return change;
+    },
+
+    getParentChange: function(node) {
+      var change = this.getChange(node);
+      if (!change.childList) {
+        change.childList = true;
+        change.oldParentNode = null;
+      }
+
+      return change;
+    },
+
+    handleChildList: function(mutation) {
+      this.childListChanges = true;
+
+      forEach(mutation.removedNodes, function(el) {
+        var change = this.getParentChange(el);
+
+        // Note: is it possible to receive a removal followed by a removal. This
+        // can occur if the removed node is added to an non-observed node, that
+        // node is added to the observed area, and then the node removed from
+        // it.
+        if (change.added || change.oldParentNode)
+          change.added = false;
+        else
+          change.oldParentNode = mutation.target;
+      }, this);
+
+      forEach(mutation.addedNodes, function(el) {
+        var change = this.getParentChange(el);
+        change.added = true;
+      }, this);
+    },
+
+    handleAttributes: function(mutation) {
+      this.attributesChanges = true;
+
+      var change = this.getChange(mutation.target);
+      if (!change.attributes) {
+        change.attributes = true;
+        change.attributeOldValues = {};
+      }
+
+      var oldValues = change.attributeOldValues;
+      if (!hasOwnProperty(oldValues, mutation.attributeName)) {
+        oldValues[mutation.attributeName] = mutation.oldValue;
+      }
+    },
+
+    handleCharacterData: function(mutation) {
+      this.characterDataChanges = true;
+
+      var change = this.getChange(mutation.target);
+      if (change.characterData)
+        return;
+      change.characterData = true;
+      change.characterDataOldValue = mutation.oldValue;
+    },
+
+    processMutations: function(mutations) {
+      this.mutations = mutations;
+      this.changeMap = new NodeMap;
+
+      this.mutations.forEach(function(mutation) {
+        switch (mutation.type) {
+          case 'childList':
+            this.handleChildList(mutation);
+            break;
+          case 'attributes':
+            this.handleAttributes(mutation);
+            break;
+          case 'characterData':
+            this.handleCharacterData(mutation);
+            break;
+        }
+      }, this);
+
+      // Calculate node movement.
+      var entered = this.entered = [];
+      var exited = this.exited = [];
+      var stayedIn = this.stayedIn = new NodeMap;
+
+      if (!this.childListChanges && !this.attributesChanges)
+        return; // No childList or attributes mutations occurred.
+
+      var matchabilityChange = this.matchabilityChange.bind(this);
+
+      var reachabilityChange = this.reachabilityChange.bind(this);
+      var wasReordered = this.wasReordered.bind(this);
+
+      var visited = new NodeMap;
+      var self = this;
+
+      function ensureHasOldPreviousSiblingIfNeeded(node) {
+        if (!self.calcOldPreviousSibling)
+          return;
+
+        self.processChildlistChanges();
+
+        var parentNode = node.parentNode;
+        var change = self.changeMap.get(node);
+        if (change && change.oldParentNode)
+          parentNode = change.oldParentNode;
+
+        change = self.childlistChanges.get(parentNode);
+        if (!change) {
+          change = {
+            oldPrevious: new NodeMap
+          };
+
+          self.childlistChanges.set(parentNode, change);
+        }
+
+        if (!change.oldPrevious.has(node)) {
+          change.oldPrevious.set(node, node.previousSibling);
+        }
+      }
+
+      function visitNode(node, parentReachable) {
+        if (visited.has(node))
+          return;
+        visited.set(node, true);
+
+        var change = self.changeMap.get(node);
+        var reachable = parentReachable;
+
+        // node inherits its parent's reachability change unless
+        // its parentNode was mutated.
+        if ((change && change.childList) || reachable == undefined)
+          reachable = reachabilityChange(node);
+
+        if (reachable == STAYED_OUT)
+          return;
+
+        // Cache match results for sub-patterns.
+        matchabilityChange(node);
+
+        if (reachable == ENTERED) {
+          entered.push(node);
+        } else if (reachable == EXITED) {
+          exited.push(node);
+          ensureHasOldPreviousSiblingIfNeeded(node);
+
+        } else if (reachable == STAYED_IN) {
+          var movement = STAYED_IN;
+
+          if (change && change.childList) {
+            if (change.oldParentNode !== node.parentNode) {
+              movement = REPARENTED;
+              ensureHasOldPreviousSiblingIfNeeded(node);
+            } else if (self.calcReordered && wasReordered(node)) {
+              movement = REORDERED;
+            }
+          }
+
+          stayedIn.set(node, movement);
+        }
+
+        if (reachable == STAYED_IN)
+          return;
+
+        // reachable == ENTERED || reachable == EXITED.
+        for (var child = node.firstChild; child; child = child.nextSibling) {
+          visitNode(child, reachable);
+        }
+      }
+
+      this.changeMap.keys().forEach(function(node) {
+        visitNode(node);
+      });
+    },
+
+    getChanged: function(summary) {
+      var matchabilityChange = this.matchabilityChange.bind(this);
+
+      this.entered.forEach(function(node) {
+        var matchable = matchabilityChange(node);
+        if (matchable == ENTERED || matchable == STAYED_IN)
+          summary.added.push(node);
+      });
+
+      this.stayedIn.keys().forEach(function(node) {
+        var matchable = matchabilityChange(node);
+
+        if (matchable == ENTERED) {
+          summary.added.push(node);
+        } else if (matchable == EXITED) {
+          summary.removed.push(node);
+        } else if (matchable == STAYED_IN && (summary.reparented || summary.reordered)) {
+          var movement = this.stayedIn.get(node);
+          if (summary.reparented && movement == REPARENTED)
+            summary.reparented.push(node);
+          else if (summary.reordered && movement == REORDERED)
+            summary.reordered.push(node);
+        }
+      }, this);
+
+      this.exited.forEach(function(node) {
+        var matchable = matchabilityChange(node);
+        if (matchable == EXITED || matchable == STAYED_IN)
+          summary.removed.push(node);
+      })
+    },
+
+    getOldParentNode: function(node) {
+      var change = this.changeMap.get(node);
+      if (change && change.childList)
+        return change.oldParentNode ? change.oldParentNode : null;
+
+      var reachabilityChange = this.reachabilityChange(node);
+      if (reachabilityChange == STAYED_OUT || reachabilityChange == ENTERED)
+        throw Error('getOldParentNode requested on invalid node.');
+
+      return node.parentNode;
+    },
+
+    getOldPreviousSibling: function(node) {
+      var parentNode = node.parentNode;
+      var change = this.changeMap.get(node);
+      if (change && change.oldParentNode)
+        parentNode = change.oldParentNode;
+
+      change = this.childlistChanges.get(parentNode);
+      if (!change)
+        throw Error('getOldPreviousSibling requested on invalid node.');
+
+      return change.oldPrevious.get(node);
+    },
+
+    getOldAttribute: function(element, attrName) {
+      var change = this.changeMap.get(element);
+      if (!change || !change.attributes)
+        throw Error('getOldAttribute requested on invalid node.');
+
+      if (change.matchCaseInsensitive)
+        attrName = attrName.toLowerCase();
+
+      if (!hasOwnProperty(change.attributeOldValues, attrName))
+        throw Error('getOldAttribute requested for unchanged attribute name.');
+
+      return change.attributeOldValues[attrName];
+    },
+
+    getAttributesChanged: function(postFilter) {
+      if (!this.attributesChanges)
+        return {}; // No attributes mutations occurred.
+
+      var attributeFilter;
+      var caseInsensitiveFilter;
+      if (postFilter) {
+        attributeFilter = {};
+        caseInsensitiveFilter = {};
+        postFilter.forEach(function(attrName) {
+          attributeFilter[attrName] = true;
+          var lowerAttrName = attrName.toLowerCase();
+          if (attrName != lowerAttrName) {
+            caseInsensitiveFilter[lowerAttrName] = attrName;
+          }
+        });
+      }
+
+      var result = {};
+
+      var nodes = this.changeMap.keys();
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+
+        var change = this.changeMap.get(node);
+        if (!change.attributes)
+          continue;
+
+        if (STAYED_IN != this.reachabilityChange(node) || STAYED_IN != this.matchabilityChange(node))
+          continue;
+
+        var element = node;
+        var oldValues = change.attributeOldValues;
+
+        Object.keys(oldValues).forEach(function(name) {
+          var localName = name;
+          if (change.matchCaseInsensitive && caseInsensitiveFilter && caseInsensitiveFilter[name])
+            localName = caseInsensitiveFilter[name];
+
+          if (attributeFilter && !attributeFilter[localName])
+            return;
+
+          if (element.getAttribute(name) == oldValues[name])
+            return;
+
+          if (!result[localName])
+            result[localName] = [];
+
+          result[localName].push(element);
+        });
+      }
+
+      return result;
+    },
+
+    getOldCharacterData: function(node) {
+      var change = this.changeMap.get(node);
+      if (!change || !change.characterData)
+        throw Error('getOldCharacterData requested on invalid node.');
+
+      return change.characterDataOldValue;
+    },
+
+    getCharacterDataChanged: function() {
+      if (!this.characterDataChanges)
+        return []; // No characterData mutations occurred.
+
+      var nodes = this.changeMap.keys();
+      var result = [];
+      for (var i = 0; i < nodes.length; i++) {
+        var target = nodes[i];
+        if (STAYED_IN != this.reachabilityChange(target) || STAYED_IN != this.matchabilityChange(target))
+          continue;
+
+        var change = this.changeMap.get(target);
+        if (!change.characterData ||
+            target.textContent == change.characterDataOldValue)
+          continue
+
+        result.push(target);
+      }
+
+      return result;
+    },
+
+    /**
+     * Returns whether a given node:
+     *
+     *    STAYED_OUT, ENTERED, STAYED_IN or EXITED
+     *
+     * the set of nodes reachable from the root.
+     *
+     * These four states are the permutations of whether the node
+     *
+     *   wasReachable(node)
+     *   isReachable(node)
+     *
+     */
+    reachabilityChange: function(node) {
+      this.reachableCache = this.reachableCache || new NodeMap;
+      this.wasReachableCache = this.wasReachableCache || new NodeMap;
+
+      // Close over owned values.
+      var rootNode = this.rootNode;
+      var changeMap = this.changeMap;
+      var reachableCache = this.reachableCache;
+      var wasReachableCache = this.wasReachableCache;
+
+      // An node's oldParent is
+      //   -its present parent, if nothing happened to it
+      //   -null if the first thing that happened to it was an add.
+      //   -the node it was removed from if the first thing that happened to it
+      //      was a remove.
+      function getOldParent(node) {
+        var change = changeMap.get(node);
+
+        if (change && change.childList) {
+          if (change.oldParentNode)
+            return change.oldParentNode;
+          if (change.added)
+            return null;
+        }
+
+        return node.parentNode;
+      }
+
+      // Is the given node reachable from the rootNode.
+      function getIsReachable(node) {
+        if (node === rootNode)
+          return true;
+        if (!node)
+          return false;
+
+        var isReachable = reachableCache.get(node);
+        if (isReachable === undefined) {
+          isReachable = getIsReachable(node.parentNode);
+          reachableCache.set(node, isReachable);
+        }
+        return isReachable;
+      }
+
+      // Was the given node reachable from the rootNode.
+      // A node wasReachable if its oldParent wasReachable.
+      function getWasReachable(node) {
+        if (node === rootNode)
+          return true;
+        if (!node)
+          return false;
+
+        var wasReachable = wasReachableCache.get(node);
+        if (wasReachable === undefined) {
+          wasReachable = getWasReachable(getOldParent(node));
+          wasReachableCache.set(node, wasReachable);
+        }
+        return wasReachable;
+      }
+
+      if (getIsReachable(node))
+        return getWasReachable(node) ? STAYED_IN : ENTERED;
+      else
+        return getWasReachable(node) ? EXITED : STAYED_OUT;
+    },
+
+    checkWasMatching: function(el, filter, isMatching) {
+      var change = this.changeMap.get(el);
+      if (!change || !change.attributeOldValues)
+        return isMatching;
+
+      var tagName = filter.tagName;
+      if (change.matchCaseInsensitive &&
+          tagName != '*' &&
+          hasOwnProperty(filter, 'caseInsensitiveTagName')) {
+        tagName = filter.caseInsensitiveTagName;
+      }
+
+      if (tagName != '*' && tagName != el.tagName)
+        return false;
+
+      var attributeOldValues = change.attributeOldValues;
+      var significantAttrChanged = filter.qualifiers.some(function(qualifier) {
+        if (qualifier.class)
+          return hasOwnProperty(attributeOldValues, 'class');
+        else if (qualifier.id)
+          return hasOwnProperty(attributeOldValues, 'id');
+        else {
+          return change.matchCaseInsensitive && hasOwnProperty(qualifier, 'caseInsensitiveAttrName') ?
+              hasOwnProperty(attributeOldValues, qualifier.caseInsensitiveAttrName) :
+              hasOwnProperty(attributeOldValues, qualifier.attrName)
+        }
+      });
+
+      if (!significantAttrChanged)
+        return isMatching;
+
+      for (var i = 0; i < filter.qualifiers.length; i++) {
+        var qualifier = filter.qualifiers[i];
+        var attrName;
+        if (qualifier.class)
+          attrName = 'class';
+        else if (qualifier.id)
+          attrName = 'id';
+        else {
+          if (change.matchCaseInsensitive &&
+              hasOwnProperty(qualifier, 'caseInsensitiveAttrName')) {
+            attrName = qualifier.caseInsensitiveAttrName;
+          } else {
+            attrName = qualifier.attrName;
+          }
+        }
+
+        var contains = qualifier.class ? true : qualifier.contains;
+
+        var attrOldValue = hasOwnProperty(attributeOldValues, attrName) ?
+            attributeOldValues[attrName] : el.getAttribute(attrName);
+
+        if (attrOldValue == null)
+          return false;
+
+        if (qualifier.hasOwnProperty('attrValue')) {
+          if (!contains && qualifier.attrValue !== attrOldValue)
+            return false;
+
+          var subvalueMatch = attrOldValue.split(' ').some(function(subValue) {
+            return subValue == qualifier.attrValue;
+          });
+
+          if (!subvalueMatch)
+            return false;
+        }
+      }
+
+      return true;
+    },
+
+    /**
+     * Returns whether a given element:
+     *
+     *   STAYED_OUT, ENTERED, EXITED or STAYED_IN
+     *
+     * the set of element which match at least one match pattern.
+     *
+     * These four states are the permutations of whether the element
+     *
+     *   wasMatching(node)
+     *   isMatching(node)
+     *
+     */
+    matchabilityChange: function(node) {
+      // TODO(rafaelw): Include PI, CDATA?
+      // Only include text nodes.
+      if (this.filterCharacterData) {
+        switch (node.nodeType) {
+          case Node.COMMENT_NODE:
+          case Node.TEXT_NODE:
+            return STAYED_IN;
+          default:
+            return STAYED_OUT;
+        }
+      }
+
+      // No element filter. Include all nodes.
+      if (!this.elementFilter)
+        return STAYED_IN;
+
+      // Element filter. Exclude non-elements.
+      if (node.nodeType !== Node.ELEMENT_NODE)
+        return STAYED_OUT;
+
+      var el = node;
+
+      function computeMatchabilityChange(filter) {
+        if (!this.matchCache)
+          this.matchCache = {};
+        if (!this.matchCache[filter.selectorString])
+          this.matchCache[filter.selectorString] = new NodeMap;
+
+        var cache = this.matchCache[filter.selectorString];
+        var result = cache.get(el);
+        if (result !== undefined)
+          return result;
+
+        var isMatching = el[matchesSelector](filter.selectorString);
+        var wasMatching = this.checkWasMatching(el, filter, isMatching);
+
+        if (isMatching)
+          result = wasMatching ? STAYED_IN : ENTERED;
+        else
+          result = wasMatching ? EXITED : STAYED_OUT;
+
+        cache.set(el, result);
+        return result;
+      }
+
+      var matchChanges = this.elementFilter.map(computeMatchabilityChange, this);
+      var accum = STAYED_OUT;
+      var i = 0;
+
+      while (accum != STAYED_IN && i < matchChanges.length) {
+        switch(matchChanges[i]) {
+          case STAYED_IN:
+            accum = STAYED_IN;
+            break;
+          case ENTERED:
+            if (accum == EXITED)
+              accum = STAYED_IN;
+            else
+              accum = ENTERED;
+            break;
+          case EXITED:
+            if (accum == ENTERED)
+              accum = STAYED_IN;
+            else
+              accum = EXITED;
+            break;
+        }
+
+        i++;
+      }
+
+      return accum;
+    },
+
+    processChildlistChanges: function() {
+      if (this.childlistChanges)
+        return;
+
+      var childlistChanges = this.childlistChanges = new NodeMap;
+
+      function getChildlistChange(el) {
+        var change = childlistChanges.get(el);
+        if (!change) {
+          change = {
+            added: new NodeMap,
+            removed: new NodeMap,
+            maybeMoved: new NodeMap,
+            oldPrevious: new NodeMap
+          };
+          childlistChanges.set(el, change);
+        }
+
+        return change;
+      }
+
+      var reachabilityChange = this.reachabilityChange.bind(this);
+      var self = this;
+
+      this.mutations.forEach(function(mutation) {
+        if (mutation.type != 'childList')
+          return;
+
+        if (reachabilityChange(mutation.target) != STAYED_IN && !self.calcOldPreviousSibling)
+          return;
+
+        var change = getChildlistChange(mutation.target);
+
+        var oldPrevious = mutation.previousSibling;
+
+        function recordOldPrevious(node, previous) {
+          if (!node ||
+              change.oldPrevious.has(node) ||
+              change.added.has(node) ||
+              change.maybeMoved.has(node))
+            return;
+
+          if (previous &&
+              (change.added.has(previous) ||
+               change.maybeMoved.has(previous)))
+            return;
+
+          change.oldPrevious.set(node, previous);
+        }
+
+        forEach(mutation.removedNodes, function(node) {
+          recordOldPrevious(node, oldPrevious);
+
+          if (change.added.has(node)) {
+            change.added.delete(node);
+          } else {
+            change.removed.set(node, true);
+            change.maybeMoved.delete(node, true);
+          }
+
+          oldPrevious = node;
+        });
+
+        recordOldPrevious(mutation.nextSibling, oldPrevious);
+
+        forEach(mutation.addedNodes, function(node) {
+          if (change.removed.has(node)) {
+            change.removed.delete(node);
+            change.maybeMoved.set(node, true);
+          } else {
+            change.added.set(node, true);
+          }
+        });
+      });
+    },
+
+    wasReordered: function(node) {
+      if (!this.childListChanges)
+        return false;
+
+      this.processChildlistChanges();
+
+      var parentNode = node.parentNode;
+      var change = this.changeMap.get(node);
+      if (change && change.oldParentNode)
+        parentNode = change.oldParentNode;
+
+      change = this.childlistChanges.get(parentNode);
+      if (!change)
+        return false;
+
+      if (change.moved)
+        return change.moved.get(node);
+
+      var moved = change.moved = new NodeMap;
+      var pendingMoveDecision = new NodeMap;
+
+      function isMoved(node) {
+        if (!node)
+          return false;
+        if (!change.maybeMoved.has(node))
+          return false;
+
+        var didMove = moved.get(node);
+        if (didMove !== undefined)
+          return didMove;
+
+        if (pendingMoveDecision.has(node)) {
+          didMove = true;
+        } else {
+          pendingMoveDecision.set(node, true);
+          didMove = getPrevious(node) !== getOldPrevious(node);
+        }
+
+        if (pendingMoveDecision.has(node)) {
+          pendingMoveDecision.delete(node);
+          moved.set(node, didMove);
+        } else {
+          didMove = moved.get(node);
+        }
+
+        return didMove;
+      }
+
+      var oldPreviousCache = new NodeMap;
+      function getOldPrevious(node) {
+        var oldPrevious = oldPreviousCache.get(node);
+        if (oldPrevious !== undefined)
+          return oldPrevious;
+
+        oldPrevious = change.oldPrevious.get(node);
+        while (oldPrevious &&
+               (change.removed.has(oldPrevious) || isMoved(oldPrevious))) {
+          oldPrevious = getOldPrevious(oldPrevious);
+        }
+
+        if (oldPrevious === undefined)
+          oldPrevious = node.previousSibling;
+        oldPreviousCache.set(node, oldPrevious);
+
+        return oldPrevious;
+      }
+
+      var previousCache = new NodeMap;
+      function getPrevious(node) {
+        if (previousCache.has(node))
+          return previousCache.get(node);
+
+        var previous = node.previousSibling;
+        while (previous && (change.added.has(previous) || isMoved(previous)))
+          previous = previous.previousSibling;
+
+        previousCache.set(node, previous);
+        return previous;
+      }
+
+      change.maybeMoved.keys().forEach(isMoved);
+      return change.moved.get(node);
+    }
+  }
+
+  // TODO(rafaelw): Allow ':' and '.' as valid name characters.
+  var validNameInitialChar = /[a-zA-Z_]+/;
+  var validNameNonInitialChar = /[a-zA-Z0-9_\-]+/;
+
+  // TODO(rafaelw): Consider allowing backslash in the attrValue.
+  // TODO(rafaelw): There's got a to be way to represent this state machine
+  // more compactly???
+  function parseElementFilter(elementFilter) {
+    var selectorGroup = [];
+    var currentSelector;
+    var currentQualifier;
+
+    function newSelector() {
+      if (currentSelector) {
+        if (currentQualifier) {
+          currentSelector.qualifiers.push(currentQualifier);
+          currentQualifier = undefined;
+        }
+
+        selectorGroup.push(currentSelector);
+      }
+      currentSelector = {
+        qualifiers: []
+      }
+    }
+
+    function newQualifier() {
+      if (currentQualifier)
+        currentSelector.qualifiers.push(currentQualifier);
+
+      currentQualifier = {};
+    }
+
+
+    var WHITESPACE = /\s/;
+    var valueQuoteChar;
+    var SYNTAX_ERROR = 'Invalid or unsupported selector syntax.';
+
+    var SELECTOR = 1;
+    var TAG_NAME = 2;
+    var QUALIFIER = 3;
+    var QUALIFIER_NAME_FIRST_CHAR = 4;
+    var QUALIFIER_NAME = 5;
+    var ATTR_NAME_FIRST_CHAR = 6;
+    var ATTR_NAME = 7;
+    var EQUIV_OR_ATTR_QUAL_END = 8;
+    var EQUAL = 9;
+    var ATTR_QUAL_END = 10;
+    var VALUE_FIRST_CHAR = 11;
+    var VALUE = 12;
+    var QUOTED_VALUE = 13;
+    var SELECTOR_SEPARATOR = 14;
+
+    var state = SELECTOR;
+    var i = 0;
+    while (i < elementFilter.length) {
+      var c = elementFilter[i++];
+
+      switch (state) {
+        case SELECTOR:
+          if (c.match(validNameInitialChar)) {
+            newSelector();
+            currentSelector.tagName = c;
+            state = TAG_NAME;
+            break;
+          }
+
+          if (c == '*') {
+            newSelector();
+            currentSelector.tagName = '*';
+            state = QUALIFIER;
+            break;
+          }
+
+          if (c == '.') {
+            newSelector();
+            newQualifier();
+            currentSelector.tagName = '*';
+            currentQualifier.class = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '#') {
+            newSelector();
+            newQualifier();
+            currentSelector.tagName = '*';
+            currentQualifier.id = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '[') {
+            newSelector();
+            newQualifier();
+            currentSelector.tagName = '*';
+            currentQualifier.attrName = '';
+            state = ATTR_NAME_FIRST_CHAR;
+            break;
+          }
+
+          if (c.match(WHITESPACE))
+            break;
+
+          throw Error(SYNTAX_ERROR);
+
+        case TAG_NAME:
+          if (c.match(validNameNonInitialChar)) {
+            currentSelector.tagName += c;
+            break;
+          }
+
+          if (c == '.') {
+            newQualifier();
+            currentQualifier.class = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '#') {
+            newQualifier();
+            currentQualifier.id = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '[') {
+            newQualifier();
+            currentQualifier.attrName = '';
+            state = ATTR_NAME_FIRST_CHAR;
+            break;
+          }
+
+          if (c.match(WHITESPACE)) {
+            state = SELECTOR_SEPARATOR;
+            break;
+          }
+
+          if (c == ',') {
+            state = SELECTOR;
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case QUALIFIER:
+          if (c == '.') {
+            newQualifier();
+            currentQualifier.class = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '#') {
+            newQualifier();
+            currentQualifier.id = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '[') {
+            newQualifier();
+            currentQualifier.attrName = '';
+            state = ATTR_NAME_FIRST_CHAR;
+            break;
+          }
+
+          if (c.match(WHITESPACE)) {
+            state = SELECTOR_SEPARATOR;
+            break;
+          }
+
+          if (c == ',') {
+            state = SELECTOR;
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case QUALIFIER_NAME_FIRST_CHAR:
+          if (c.match(validNameInitialChar)) {
+            currentQualifier.attrValue = c;
+            state = QUALIFIER_NAME;
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case QUALIFIER_NAME:
+          if (c.match(validNameNonInitialChar)) {
+            currentQualifier.attrValue += c;
+            break;
+          }
+
+          if (c == '.') {
+            newQualifier();
+            currentQualifier.class = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '#') {
+            newQualifier();
+            currentQualifier.id = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '[') {
+            newQualifier();
+            state = ATTR_NAME_FIRST_CHAR;
+            break;
+          }
+
+          if (c.match(WHITESPACE)) {
+            state = SELECTOR_SEPARATOR;
+            break;
+          }
+          if (c == ',') {
+            state = SELECTOR;
+            break
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case ATTR_NAME_FIRST_CHAR:
+          if (c.match(validNameInitialChar)) {
+            currentQualifier.attrName = c;
+            state = ATTR_NAME;
+            break;
+          }
+
+          if (c.match(WHITESPACE))
+            break;
+
+          throw Error(SYNTAX_ERROR);
+
+        case ATTR_NAME:
+          if (c.match(validNameNonInitialChar)) {
+            currentQualifier.attrName += c;
+            break;
+          }
+
+          if (c.match(WHITESPACE)) {
+            state = EQUIV_OR_ATTR_QUAL_END;
+            break;
+          }
+
+          if (c == '~') {
+            currentQualifier.contains = true;
+            state = EQUAL;
+            break;
+          }
+
+          if (c == '=') {
+            currentQualifier.attrValue = '';
+            state = VALUE_FIRST_CHAR;
+            break;
+          }
+
+          if (c == ']') {
+            state = QUALIFIER;
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case EQUIV_OR_ATTR_QUAL_END:
+          if (c == '~') {
+            currentQualifier.contains = true;
+            state = EQUAL;
+            break;
+          }
+
+          if (c == '=') {
+            currentQualifier.attrValue = '';
+            state = VALUE_FIRST_CHAR;
+            break;
+          }
+
+          if (c == ']') {
+            state = QUALIFIER;
+            break;
+          }
+
+          if (c.match(WHITESPACE))
+            break;
+
+          throw Error(SYNTAX_ERROR);
+
+        case EQUAL:
+          if (c == '=') {
+            currentQualifier.attrValue = '';
+            state = VALUE_FIRST_CHAR
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case ATTR_QUAL_END:
+          if (c == ']') {
+            state = QUALIFIER;
+            break;
+          }
+
+          if (c.match(WHITESPACE))
+            break;
+
+          throw Error(SYNTAX_ERROR);
+
+        case VALUE_FIRST_CHAR:
+          if (c.match(WHITESPACE))
+            break;
+
+          if (c == '"' || c == "'") {
+            valueQuoteChar = c;
+            state = QUOTED_VALUE;
+            break;
+          }
+
+          currentQualifier.attrValue += c;
+          state = VALUE;
+          break;
+
+        case VALUE:
+          if (c.match(WHITESPACE)) {
+            state = ATTR_QUAL_END;
+            break;
+          }
+          if (c == ']') {
+            state = QUALIFIER;
+            break;
+          }
+          if (c == "'" || c == '"')
+            throw Error(SYNTAX_ERROR);
+
+          currentQualifier.attrValue += c;
+          break;
+
+        case QUOTED_VALUE:
+          if (c == valueQuoteChar) {
+            state = ATTR_QUAL_END;
+            break;
+          }
+
+          currentQualifier.attrValue += c;
+          break;
+
+        case SELECTOR_SEPARATOR:
+          if (c.match(WHITESPACE))
+            break;
+
+          if (c == ',') {
+            state = SELECTOR;
+            break
+          }
+
+          throw Error(SYNTAX_ERROR);
+      }
+    }
+
+    switch (state) {
+      case SELECTOR:
+      case TAG_NAME:
+      case QUALIFIER:
+      case QUALIFIER_NAME:
+      case SELECTOR_SEPARATOR:
+        // Valid end states.
+        newSelector();
+        break;
+      default:
+        throw Error(SYNTAX_ERROR);
+    }
+
+    if (!selectorGroup.length)
+      throw Error(SYNTAX_ERROR);
+
+    function escapeQuotes(value) {
+      return '"' + value.replace(/"/, '\\\"') + '"';
+    }
+
+    selectorGroup.forEach(function(selector) {
+      var caseInsensitiveTagName = selector.tagName.toUpperCase();
+      if (selector.tagName != caseInsensitiveTagName)
+        selector.caseInsensitiveTagName = caseInsensitiveTagName;
+
+      var selectorString = selector.tagName;
+
+      selector.qualifiers.forEach(function(qualifier) {
+        if (qualifier.class)
+          selectorString += '.' + qualifier.attrValue;
+        else if (qualifier.id)
+          selectorString += '#' + qualifier.attrValue;
+        else {
+          var caseInsensitiveAttrName = qualifier.attrName.toLowerCase();
+          if (qualifier.attrName != caseInsensitiveAttrName)
+            qualifier.caseInsensitiveAttrName = caseInsensitiveAttrName;
+
+          if (qualifier.contains)
+            selectorString += '[' + qualifier.attrName + '~=' + escapeQuotes(qualifier.attrValue) + ']';
+          else {
+            selectorString += '[' + qualifier.attrName;
+            if (qualifier.hasOwnProperty('attrValue'))
+              selectorString += '=' + escapeQuotes(qualifier.attrValue);
+            selectorString += ']';
+          }
+        }
+      });
+
+      selector.selectorString = selectorString;
+    });
+
+    return selectorGroup;
+  }
+
+  var attributeFilterPattern = /^([a-zA-Z:_]+[a-zA-Z0-9_\-:\.]*)$/;
+
+  function validateAttribute(attribute) {
+    if (typeof attribute != 'string')
+      throw Error('Invalid request opion. attribute must be a non-zero length string.');
+
+    attribute = attribute.trim();
+
+    if (!attribute)
+      throw Error('Invalid request opion. attribute must be a non-zero length string.');
+
+
+    if (!attribute.match(attributeFilterPattern))
+      throw Error('Invalid request option. invalid attribute name: ' + attribute);
+
+    return attribute;
+  }
+
+  function validateElementAttributes(attribs) {
+    if (!attribs.trim().length)
+      throw Error('Invalid request option: elementAttributes must contain at least one attribute.');
+
+    var lowerAttributes = {};
+    var attributes = {};
+
+    var tokens = attribs.split(/\s+/);
+    for (var i = 0; i < tokens.length; i++) {
+      var attribute = tokens[i];
+      if (!attribute)
+        continue;
+
+      var attribute = validateAttribute(attribute);
+      if (lowerAttributes.hasOwnProperty(attribute.toLowerCase()))
+        throw Error('Invalid request option: observing multiple case varitations of the same attribute is not supported.');
+      attributes[attribute] = true;
+      lowerAttributes[attribute.toLowerCase()] = true;
+    }
+
+    return Object.keys(attributes);
+  }
+
+  function validateOptions(options) {
+    var validOptions = {
+      'callback': true, // required
+      'queries': true,  // required
+      'rootNode': true,
+      'oldPreviousSibling': true,
+      'observeOwnChanges': true
+    };
+
+    var opts = {};
+
+    for (var opt in options) {
+      if (!(opt in validOptions))
+        throw Error('Invalid option: ' + opt);
+    }
+
+    if (typeof options.callback !== 'function')
+      throw Error('Invalid options: callback is required and must be a function');
+
+    opts.callback = options.callback;
+    opts.rootNode = options.rootNode || document;
+    opts.observeOwnChanges = options.observeOwnChanges;
+    opts.oldPreviousSibling = options.oldPreviousSibling;
+
+    if (!options.queries || !options.queries.length)
+      throw Error('Invalid options: queries must contain at least one query request object.');
+
+    opts.queries = [];
+
+    for (var i = 0; i < options.queries.length; i++) {
+      var request = options.queries[i];
+
+      // all
+      if (request.all) {
+        if (Object.keys(request).length > 1)
+          throw Error('Invalid request option. all has no options.');
+
+        opts.queries.push({all: true});
+        continue;
+      }
+
+      // attribute
+      if (request.hasOwnProperty('attribute')) {
+        var query = {
+          attribute: validateAttribute(request.attribute)
+        };
+
+        query.elementFilter = parseElementFilter('*[' + query.attribute + ']');
+
+        if (Object.keys(request).length > 1)
+          throw Error('Invalid request option. attribute has no options.');
+
+        opts.queries.push(query);
+        continue;
+      }
+
+      // element
+      if (request.hasOwnProperty('element')) {
+        var requestOptionCount = Object.keys(request).length;
+        var query = {
+          element: request.element,
+          elementFilter: parseElementFilter(request.element)
+        };
+
+        if (request.hasOwnProperty('elementAttributes')) {
+          query.elementAttributes = validateElementAttributes(request.elementAttributes);
+          requestOptionCount--;
+        }
+
+        if (requestOptionCount > 1)
+          throw Error('Invalid request option. element only allows elementAttributes option.');
+
+        opts.queries.push(query);
+        continue;
+      }
+
+      // characterData
+      if (request.characterData) {
+        if (Object.keys(request).length > 1)
+          throw Error('Invalid request option. characterData has no options.');
+
+        opts.queries.push({ characterData: true });
+        continue;
+      }
+
+      throw Error('Invalid request option. Unknown query request.');
+    }
+
+    return opts;
+  }
+
+  function elementFilterAttributes(filters) {
+    var attributes = {};
+
+    filters.forEach(function(filter) {
+      filter.qualifiers.forEach(function(qualifier) {
+        if (qualifier.class)
+          attributes['class'] = true;
+        else if (qualifier.id)
+          attributes['id'] = true;
+        else
+          attributes[qualifier.attrName] = true;
+      });
+    });
+
+    return Object.keys(attributes);
+  }
+
+  function createObserverOptions(queries) {
+    var observerOptions = {
+      childList: true,
+      subtree: true
+    };
+
+    var attributeFilter;
+    function observeAttributes(attributes) {
+      if (observerOptions.attributes && !attributeFilter)
+        return; // already observing all.
+
+      observerOptions.attributes = true;
+      observerOptions.attributeOldValue = true;
+
+      if (!attributes) {
+        // observe all.
+        attributeFilter = undefined;
+        return;
+      }
+
+      // add to observed.
+      attributeFilter = attributeFilter || {};
+      attributes.forEach(function(attribute) {
+        attributeFilter[attribute] = true;
+        attributeFilter[attribute.toLowerCase()] = true;
+      });
+    }
+
+    queries.forEach(function(request) {
+      if (request.characterData) {
+        observerOptions.characterData = true;
+        observerOptions.characterDataOldValue = true;
+        return;
+      }
+
+      if (request.all) {
+        observeAttributes();
+        observerOptions.characterData = true;
+        observerOptions.characterDataOldValue = true;
+        return;
+      }
+
+      if (request.attribute) {
+        observeAttributes([request.attribute.trim()]);
+        return;
+      }
+
+      if (request.elementFilter && request.elementFilter.some(function(f) { return f.className; } ))
+         observeAttributes(['class']);
+
+      var attributes = elementFilterAttributes(request.elementFilter).concat(request.elementAttributes || []);
+      if (attributes.length)
+        observeAttributes(attributes);
+    });
+
+    if (attributeFilter)
+      observerOptions.attributeFilter = Object.keys(attributeFilter);
+
+    return observerOptions;
+  }
+
+  function createSummary(projection, root, query) {
+    projection.elementFilter = query.elementFilter;
+    projection.filterCharacterData = query.characterData;
+
+    var summary = {
+      target: root,
+      type: 'summary',
+      added: [],
+      removed: []
+    };
+
+    summary.getOldParentNode = projection.getOldParentNode.bind(projection);
+
+    if (query.all || query.element)
+      summary.reparented = [];
+
+    if (query.all)
+      summary.reordered = [];
+
+    projection.getChanged(summary);
+
+    if (query.all || query.attribute || query.elementAttributes) {
+      var filter = query.attribute ? [ query.attribute ] : query.elementAttributes;
+      var attributeChanged = projection.getAttributesChanged(filter);
+
+      if (query.attribute) {
+        summary.valueChanged = [];
+        if (attributeChanged[query.attribute])
+          summary.valueChanged = attributeChanged[query.attribute];
+
+        summary.getOldAttribute = function(node) {
+          return projection.getOldAttribute(node, query.attribute);
+        }
+      } else {
+        summary.attributeChanged = attributeChanged;
+        if (query.elementAttributes) {
+          query.elementAttributes.forEach(function(attrName) {
+            if (!summary.attributeChanged.hasOwnProperty(attrName))
+              summary.attributeChanged[attrName] = [];
+          });
+        }
+        summary.getOldAttribute = projection.getOldAttribute.bind(projection);
+      }
+    }
+
+    if (query.all || query.characterData) {
+      var characterDataChanged = projection.getCharacterDataChanged()
+      summary.getOldCharacterData = projection.getOldCharacterData.bind(projection);
+
+      if (query.characterData)
+        summary.valueChanged = characterDataChanged;
+      else
+        summary.characterDataChanged = characterDataChanged;
+    }
+
+    if (summary.reordered)
+      summary.getOldPreviousSibling = projection.getOldPreviousSibling.bind(projection);
+
+    return summary;
+  }
+
+  function MutationSummary(opts) {
+    var connected = false;
+    var options = validateOptions(opts);
+    var observerOptions = createObserverOptions(options.queries);
+
+    var root = options.rootNode;
+    var callback = options.callback;
+
+    var elementFilter = Array.prototype.concat.apply([], options.queries.map(function(query) {
+      return query.elementFilter ? query.elementFilter : [];
+    }));
+    if (!elementFilter.length)
+      elementFilter = undefined;
+
+    var calcReordered = options.queries.some(function(query) {
+      return query.all;
+    });
+
+    var queryValidators = []
+    if (MutationSummary.createQueryValidator) {
+      queryValidators = options.queries.map(function(query) {
+        return MutationSummary.createQueryValidator(root, query);
+      });
+    }
+
+    function checkpointQueryValidators() {
+      queryValidators.forEach(function(validator) {
+        if (validator)
+          validator.recordPreviousState();
+      });
+    }
+
+    function runQueryValidators(summaries) {
+      queryValidators.forEach(function(validator, index) {
+        if (validator)
+          validator.validate(summaries[index]);
+      });
+    }
+
+    function createSummaries(mutations) {
+      if (!mutations || !mutations.length)
+        return [];
+
+      var projection = new MutationProjection(root, elementFilter, calcReordered, options.oldPreviousSibling);
+      projection.processMutations(mutations);
+
+      return options.queries.map(function(query) {
+        return createSummary(projection, root, query);
+      });
+    }
+
+    function changesToReport(summaries) {
+      return summaries.some(function(summary) {
+        var summaryProps =  ['added', 'removed', 'reordered', 'reparented',
+                             'valueChanged', 'characterDataChanged'];
+        if (summaryProps.some(function(prop) { return summary[prop] && summary[prop].length; }))
+          return true;
+
+        if (summary.attributeChanged) {
+          var attrsChanged = Object.keys(summary.attributeChanged).some(function(attrName) {
+            return summary.attributeChanged[attrName].length
+          });
+          if (attrsChanged)
+            return true;
+        }
+        return false;
+      });
+    }
+
+    var observer = new MutationObserver(function(mutations) {
+      if (!options.observeOwnChanges)
+        observer.disconnect();
+
+      var summaries = createSummaries(mutations);
+      runQueryValidators(summaries);
+
+      if (options.observeOwnChanges)
+        checkpointQueryValidators();
+
+      if (changesToReport(summaries))
+        callback(summaries);
+
+      // disconnect() may have been called during the callback.
+      if (!options.observeOwnChanges && connected) {
+        checkpointQueryValidators();
+        observer.observe(root, observerOptions);
+      }
+    });
+
+    this.reconnect = function() {
+      if (connected)
+        throw Error('Already connected');
+
+      observer.observe(root, observerOptions);
+      connected = true;
+      checkpointQueryValidators();
+    };
+
+    var takeSummaries = this.takeSummaries = function() {
+      if (!connected)
+        throw Error('Not connected');
+
+      var mutations = observer.takeRecords();
+      var summaries = createSummaries(mutations);
+      if (changesToReport(summaries))
+        return summaries;
+    };
+
+    this.disconnect = function() {
+      var summaries = takeSummaries();
+
+      observer.disconnect();
+      connected = false;
+
+      return summaries;
+    };
+
+    this.reconnect();
+  }
+
+  // Externs
+  global.MutationSummary = MutationSummary;
+  global.MutationSummary.NodeMap = NodeMap; // exposed for use in TreeMirror.
+  global.MutationSummary.parseElementFilter = parseElementFilter; // exposed for testing.
+})(this);
 // Displays the visitors chat sessions
 // chatWindow - the div that displays the chats
 function MaqawChatManager(chatWindow) {
@@ -36,6 +2390,334 @@ MaqawChatManager.prototype.clear = function(visitor) {
     }
 
 };/**
+ * Created By: Eli
+ * Date: 7/24/13
+ */
+
+/*
+ * This is a wrapper class for a peerjs connection. It gracefully handles making the connection,
+ * reopening the connection when it drops, saving and loading connection state, and reliably transferring
+ * data over the connection.
+ *
+ * peer - The Peer object representing our client
+ * dstId - The peer id we want to connect with
+ * dataCallback - This function is passed any data that the connection receives
+ * connectionCallback - This function is called whenever the connection status changes. It is passed true
+ *      if the connection is open and false otherwise
+ * conn - Optional. This is a peerjs DataConnection object. If included, the MaqawConnection will use it
+ *      instead of creating a new one.
+ */
+
+function MaqawConnection(peer, dstId, conn) {
+    var that = this;
+    this.peer = peer;
+    this.dstId = dstId;
+
+    //  Callback arrays //
+    this.closeDirectives = [];
+    this.openDirectives = [];
+    this.dataDirectives = [];
+    this.errorDirectives = [];
+    this.changeDirectives = [];
+    //          
+
+    // whether or not this connection is open. True if open and false otherwise
+    this.isConnected = false;
+
+    // whether or not the peer we are talking to has an established connection with the PeerServer.
+    // Their connection with the server will drop whenever they leave the page
+    this.isPeerConnectedToServer = true;
+
+    // the peerjs DataConnection object we are using
+    this.conn;
+
+    // if a DataConnection was provided then use it. Otherwise make a new one
+    if (conn) {
+        this.conn = conn;
+    } else {
+        this.conn = this.peer.connect(this.dstId, {reliable: true});
+    }
+
+    // check the current status of the connection. It may already be open if one was passed in
+    setConnectionStatus(this.conn.open);
+
+    setConnectionCallbacks();
+
+    /*
+     * Handle data that was received by this connection. Extract any meta data we need
+     * and pass the rest of it on to the data callback
+     */
+    function handleData(data) {
+        // for now we are just sending text
+        var i, dataLen = that.dataDirectives.length;
+        for (i = 0; i < dataLen; i++) {
+            that.dataDirectives[i](data);
+        }
+    }
+
+    /*
+     * Update the status of the connection, and pass the status on to
+     * the connectionListener
+     */
+    function setConnectionStatus(connectionStatus) {
+        var i,
+            changeLen = that.changeDirectives.length,
+            openLen = that.openDirectives.length,
+            closeLen = that.closeDirectives.length;
+
+        for (i = 0; i < changeLen; i++) {
+            that.changeDirectives[i](connectionStatus);
+        }
+
+        if (connectionStatus === false) {
+            for (i = 0; i < closeLen; i++) {
+                that.closeDirectives[i](connectionStatus);
+            }
+        } else if (connectionStatus === true) {
+            for (i = 0; i < openLen; i++) {
+                that.openDirectives[i](connectionStatus);
+            }
+        }
+        that.isConnected = Boolean(connectionStatus);
+    }
+
+    /*
+     * Whether or not our peer is connected to the PeerServer. They will be briefly disconnected every time
+     * they change pages or reload. This is a faster way of knowing that our connection is broken than
+     * waiting for the DataConnection to alert us (which takes a few seconds). Once our peer reconnects to the
+     * server we need to reopen our DataConnection with them.
+     * connectionStatus - true if the peer is connected and false otherwise
+     */
+    this.setServerConnectionStatus = function (connectionStatus) {
+        // if our peer is not connected to the server, disconnect our DataChannel with them
+        if (!connectionStatus) {
+            setConnectionStatus(false);
+        }
+        // if the peer was previously disconnected but is now connected, try to reopen a DataChannel
+        // with them
+        if (!that.isPeerConnectedToServer && connectionStatus) {
+            attemptConnection();
+        }
+
+        // save connection status
+        that.isPeerConnectedToServer = connectionStatus;
+    };
+
+    /*
+     * Tries to open a DataChannel with our  peer. Will retry at a set interval for a set number
+     * of attempts before giving up.
+     */
+    function attemptConnection() {
+        // how many milliseconds we will wait until trying to connect again
+
+        /* TODO: Exponential backoff instead? */
+
+        var retryInterval = 8000;
+
+        //  The max number of times a connection will be attempted
+        var retryLimit = 5;
+        var numAttempts = 0;
+
+        /** TODO: We should look into running web workers **/
+
+            // create a function that will attempt to open a connection, and will retry
+            // every retryInterval milliseconds until a connection is established
+            // this function is immediately invoked
+        (function tryOpeningConnection() {
+            // start the connection opening process
+            if (!that.isConnected && numAttempts < retryLimit) {
+                numAttempts++;
+
+                // close old connection
+                if(that.conn){
+                    that.conn.close();
+                }
+
+                // open a new connection
+                that.conn = that.peer.connect(that.dstId);
+
+                // attach event listeners to our new connection
+                setConnectionCallbacks();
+
+                // schedule it to try again in a bit. This will only run
+                // if our latest connection doesn't open
+                setTimeout(tryOpeningConnection, retryInterval);
+            }
+        })();
+    }
+
+    /*
+     * Handle a new peerjs connection request from our peer
+     */
+    this.newConnectionRequest = function(conn){
+        console.log("erasing old connection");
+        // close the old connection
+        if(that.conn){
+            that.conn.close();
+        }
+
+        // set up the new connection with callbacks
+        that.conn = conn;
+        setConnectionCallbacks();
+    };
+
+    /*
+     * Send text through this connection
+     */
+    this.sendText = function (text) {
+        that.conn.send({
+            'type': 'text',
+            'text': text
+        });
+    };
+
+    /*
+     * Initializes a screen sharing session
+     */
+    this.startScreenShare = function (options) {
+
+    };
+
+    /*
+     * Sends screen data
+     */
+    this.sendScreen = function (screenData) {
+
+    };
+
+    this.send = function(data) {
+      //  unopinionated, unreliable
+      //  send function. packets 
+      //  may arrive, packets may not
+      that.conn.send(data);  
+    }
+
+    this.on = function (_event, directive) {
+        // bind callback
+        if (_event === 'data')   this.dataDirectives.push(directive);
+        else if (_event === 'open')   this.openDirectives.push(directive);
+        else if (_event === 'close')  this.closeDirectives.push(directive);
+        else if (_event === 'error')  this.errorDirectives.push(directive);
+        else if (_event === 'change') this.changeDirectives.push(directive);
+
+        return this;
+    };
+
+    function setConnectionCallbacks() {
+        that.conn.on('open', function () {
+            setConnectionStatus(true);
+        });
+
+        that.conn.on('data', function (data) {
+            // if we are receiving data the connection is definitely open
+            setConnectionStatus(true);
+            handleData(data);
+        });
+
+        that.conn.on('close', function (err) {
+            setConnectionStatus(false);
+        });
+
+        that.conn.on('error', function (err) {
+            console.log("Connection error: " + err);
+            var i, errorLen = that.errorDirectives.length;
+            for (i = 0; i < errorLen; i++) {
+                that.errorDirectives[i](err);
+            }
+        });
+    }
+}
+/*
+ * The ConnectionManager keeps track of existing connections and assists in creating
+ * new connections. You can explicitly create a new connection, or set a listener
+ * that alerts you when another peer establishes a connection with this peer.
+ * peer - Our peer object
+ */
+
+function MaqawConnectionManager(peer) {
+    var that = this;
+    this.peer = peer;
+    this.visitors;
+    this.representatives;
+    this.connectionDirectives = [];
+
+
+    // a list of all connections that we've created, where the key is the connecting peer id
+    // and the value is the MaqawConnection object
+    this.connectionList = {};
+
+    // a list of connections that were the result of incoming requests
+    this.incomingConnections = {};
+
+    /*
+     * Passed the list of visitors connected to the PeerServer. Update connections
+     * based on whether or not the associated visitor is connected
+     */
+    this.setVisitors = function (visitors) {
+        // go through our list of connections and update their connection status
+        for (var id in that.connectionList) {
+            var conn = that.connectionList[id];
+            // indexOf returns -1 if the array does not contain the id
+            var index = visitors.indexOf(id);
+            if (index !== -1) {
+                conn.setServerConnectionStatus(true);
+            } else {
+                conn.setServerConnectionStatus(false);
+            }
+        }
+    };
+
+    this.on = function (_event, directive) {
+        if (_event === 'connection') this.connectionDirectives.push(directive);
+
+        return this;
+    };
+
+    /*
+     * Listens for incoming connection requests. If we've already setup a MaqawConnection
+     * with the incoming peer, update the MaqawConnection with the new peerjs connection.
+     * Otherwise create and return a new MaqawConnection with the peerjs connection.
+     */
+    this.peer.on('connection', function (conn) {
+        // check for an existing connection with this peer
+        var existingConn = that.incomingConnections[conn.peer];
+        if (existingConn) {
+            existingConn.newConnectionRequest(conn);
+        }
+        // otherwise create a new MaqawConnection
+        else {
+            var i, len = that.connectionDirectives.length,
+                maqawConnection = new MaqawConnection(that.peer, null, conn);
+            for (i = 0; i < len; i++) {
+                that.connectionDirectives[i](maqawConnection);
+            }
+            // save the connection in our list
+            that.incomingConnections[conn.peer] = maqawConnection;
+        }
+    });
+
+    /*
+     * Create and return a new MaqawConnection object that connects to the
+     * given id. The connectionCallback is a function that will be called
+     * every time the state of the connection changes. Undetermined functionality
+     * when you call this with the same id multiple times. Don't do it.
+     */
+    this.newConnection = function (id) {
+        var connection = new MaqawConnection(that.peer, id);
+        that.connectionList[id] = connection;
+        return connection;
+    };
+
+    /*
+     * Get a connection for a specific id. If a connection exists, its MaqawConnection
+     * object is return. If no connection exists for that id, undefined is returned
+     */
+    this.getConnection = function (id) {
+        return that.connectionList[id];
+    };
+
+}
+/**
  * Created By: Eli
  * Date: 7/15/13
  */
