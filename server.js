@@ -3,16 +3,16 @@
  * Module dependencies
  */
 
-var express = require('express')
-var passport = require('passport')
-var env = process.env.NODE_ENV || 'development'
-var config = require('./config/config')[env]
-var mongoose = require('mongoose')
-var fs = require('fs')
+var express = require('express');
+var passport = require('passport');
+var env = process.env.NODE_ENV || 'development';
+var config = require('./config/config')[env];
+var mongoose = require('mongoose');
+var fs = require('fs');
 
-require('express-namespace')
+require('express-namespace');
 
-mongoose.connect(config.db)
+mongoose.connect(config.db);
 
 // Bootstrap models
 fs.readdirSync(__dirname + '/app/models').forEach(function (file) {
@@ -22,7 +22,7 @@ fs.readdirSync(__dirname + '/app/models').forEach(function (file) {
 // Bootstrap passport config
 require('./config/passport')(passport, config)
 
-var app = express()
+var app = express();
 
 //
 // serving minified javascript files //
@@ -30,10 +30,13 @@ var app = express()
 app.use('/cdn', express.static(__dirname + '/public/cdn'));
 
 // Bootstrap application settings
-require('./config/express')(app, config, passport)
+require('./config/express')(app, config, passport);
 
 // Bootstrap routes
-require('./config/routes')(app, passport)
+require('./config/routes')(app, passport);
+
+// Utility functions
+require('./app/util');
 
 // Start the app by listening on <port>
 var port = process.env.PORT || 3001
