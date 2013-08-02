@@ -14,26 +14,28 @@ exports.register = function (req, res) {
       passwordConfirmation = req.body.password_confirmation;
 
   if (!company) {
-    return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Enter in a company name' });
+    return res.json(400, { error: 'Enter your company\'s name' });
+    //return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Enter in a company name' });
   }
 
   if (!email) {
-    return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Enter your email address' });
+    return res.json(400, { error: 'Enter your email address' });
+    //return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Enter your email address' });
   }
 
   if (password != passwordConfirmation) {
-    return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Passwords did not match.' });
+    return res.json(400, { error: 'The password and the password confirmation did not match'});
+    //return res.render('account/register', { title: 'Register for a beta account', error: 'Error: Passwords did not match.' });
   }
 
   var user = new User({ email: email, company: company });
-  var hashed_password = User.hash(password);
-  user.hashed_password = hashed_password;
+  user.hashed_password = User.hash(password);
 
   user.save(function(err) {
     if (err) {
       res.format({
         'application/json': function() {
-          return res.send(500, { error: 'Registration failure' });
+          return res.send(400, { error: 'Registration failure' });
         },
         default: function() {
           return res.redirect('/users/register');
@@ -43,7 +45,7 @@ exports.register = function (req, res) {
     }
       res.format({
         'application/json': function() {
-          return res.send(200, { error: 'Registration successful' });
+          return res.send(200, { success: 'Registration successful', key: user._id, name: user.company });
         },
         default: function() {
           return res.redirect('/users/account');
@@ -57,6 +59,10 @@ exports.login = function(req, res, next) {
   passport.authenticate('local', function(err, user, info) {
     res.header('Access-Control-Allow-Origin', '*');
     console.log("inside of the login function");
+
+    var id = req.body.user ? req.body.user.id : "undefined";
+    var key = req.body.user ? req.body.user.key : "undefined";
+
     if (err) return next(err);
     if (!user) {
       /*
@@ -65,7 +71,7 @@ exports.login = function(req, res, next) {
       */
       res.format({
         'application/json': function() {
-          return res.send(401, { error: 'Email or password was incorrect' });
+          return res.send(400, { error: 'Email or password was incorrect' });
         },
         default: function() {
           return res.redirect('/users/login');
@@ -76,7 +82,7 @@ exports.login = function(req, res, next) {
       if (err) return next(err);
       res.format({
         'application/json': function() {
-          return res.send(200, { error: 'Login successful' });
+          return res.send(200, { success: 'Login successful', key: user._id, name: user.company });
         },
         default: function() {
           return res.redirect('/users/account');
