@@ -48,7 +48,8 @@ var io = require('socket.io').listen(app.listen(port));
 console.log('Express app started on port '+port)
 
 // Websockets
-require('./app/ws')(io);
+var ws = require('./app/ws');
+ws.initWS(io);
 
 // Expose app
 module.exports = app

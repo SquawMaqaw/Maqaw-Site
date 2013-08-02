@@ -14,8 +14,6 @@ var User = mongoose.model('User')
 module.exports = function (passport, config) {
   // serialize sessions
   passport.serializeUser(function(user, done) {
-    console.log("inside of serializeUser fun");
-    console.log(user);
     done(null, user._id)
   })
 
@@ -35,8 +33,6 @@ module.exports = function (passport, config) {
         criteria: { email: email }
       }
       User.findOne({ email: email }, function(err, user) {
-        console.log("inside of user findone");
-        console.log(user);
         if (err) { return done(err) }
         if (!user) {
           return done(null, false, { message: 'Incorrect email' })
@@ -44,8 +40,6 @@ module.exports = function (passport, config) {
         if (!user.authenticate(password)) {
           return done(null, false, { message: 'Incorrect password' })
         }
-        console.log("before returning findOne:");
-        console.log(user);
 
         return done(null, user);
       });

@@ -2,29 +2,60 @@
  * Websockets
  */
 
-module.exports = function(io) {
-  var peers = [],
-      sockets = [],
-      dataConnections = [];
+exports.assignToRepresentative = function(id) {
+  console.log("we in");
+  for (var i = 0; i < peers.length; i++) {
+    if (peers[i].id == id) peers[i].representative = true;
+  }
+
+  console.log("new peers aftr assin to rep");
+  console.log(peers);
+
+  for (var i = 0; i < sockets.length; i++) {
+    var representatives = peers.filter(function(el) {
+      return el.representative;
+    }) || [];
+
+    console.log("representatives is");
+    console.log(representatives);
+
+    sockets[i].socket.emit('representatives', { msg: representatives });
+  }
+};
+
+exports.initWS = function(io) {
+  peers = [];
+  sockets = [];
+  dataConnections = [];
+
+  /*
+  var peers = require('./ws_data')[peers],
+      sockets = require('./ws_data')[sockets],
+      dataConnections = require('./ws_data')[dataConnections];
+  console.log("peers at top");
+  console.log(peers);
+  */
 
   io.set('log level', 0);
 
   // Add a new socket
   function addPeer(peer, peerSocket) {
+    console.log("peers in addPeer");
+    console.log(peers);
     peers.push(peer);
     sockets.push(peerSocket);
 
     if (peer.representative) {
       // get back list of visitors
-      peerSocket.socket.emit('visitors', peers.filter(function(el) {
+      peerSocket.socket.emit('visitors', { msg: peers.filter(function(el) {
         return !el.representative;
-      }));
+      })});
 
     } else {
       // get back list of reps
-      peerSocket.socket.emit('representatives', peers.filter(function(el) {
+      peerSocket.socket.emit('representatives', { msg: peers.filter(function(el) {
         return el.representative;
-      }));
+      })});
 
       // let all reps know you exist
       var representatives = sockets.filter(function(el) {
@@ -42,13 +73,18 @@ module.exports = function(io) {
 
     // Initialize the connection
     socket.on('init connect', function(data) {
-      if (!data.id) data.id = 9999; // Generate ID for user
+      console.log("we inited a new connection");
+      if (!data.id) data.id = generateID(); // Generate ID for user
+      console.log("random id:");
+      console.log(data.id);
       socket.peerId = data.id;
 
       socket.emit('peer open', data.id);
 
       var peerSocket = { id: data.id, representative: data.representative, socket: socket };
       addPeer(data, peerSocket);
+      console.log("the peer list looks like:");
+      console.log(peers);
 
     });
 
@@ -114,6 +150,12 @@ module.exports = function(io) {
       });
     })
   });
+
+  // Generate a random ID
+  function generateID() {
+    console.log("inside generate id");
+    return Math.random().toString(36).substr(2);
+  }
 
   // Find an element in an array (use underscore function??)
   Array.prototype._findById = function (id) {

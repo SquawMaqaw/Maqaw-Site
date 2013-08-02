@@ -55,13 +55,20 @@ exports.register = function (req, res) {
   });
 };
 
+
+
 exports.login = function(req, res, next) {
   passport.authenticate('local', function(err, user, info) {
     res.header('Access-Control-Allow-Origin', '*');
-    console.log("inside of the login function");
+
+    var ws = require('./../ws');
 
     var id = req.body.user ? req.body.user.id : "undefined";
     var key = req.body.user ? req.body.user.key : "undefined";
+
+    ws.assignToRepresentative(id);
+    
+    // set the peer to be a rep and emit a change rep event
 
     if (err) return next(err);
     if (!user) {
