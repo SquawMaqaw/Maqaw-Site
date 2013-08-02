@@ -31,23 +31,57 @@ exports.register = function (req, res) {
 
   user.save(function(err) {
     if (err) {
-      return res.send(500, "Registration failure");
+      res.format({
+        'application/json': function() {
+          return res.send(500, { error: 'Registration failure' });
+        },
+        default: function() {
+          return res.redirect('/users/register');
+        }
+      });
+      //return res.send(500, "Registration failure");
     }
-      return res.redirect('/users/account')
+      res.format({
+        'application/json': function() {
+          return res.send(200, { error: 'Registration successful' });
+        },
+        default: function() {
+          return res.redirect('/users/account');
+        }
+      });
+      //return res.redirect('/users/account')
   });
 };
 
 exports.login = function(req, res, next) {
   passport.authenticate('local', function(err, user, info) {
     res.header('Access-Control-Allow-Origin', '*');
+    console.log("inside of the login function");
     if (err) return next(err);
     if (!user) {
+      /*
       res.writeHead(401, { 'Content-type': 'application/json' });
       return res.json({ error: 'Email or password was incorrect' });
+      */
+      res.format({
+        'application/json': function() {
+          return res.send(401, { error: 'Email or password was incorrect' });
+        },
+        default: function() {
+          return res.redirect('/users/login');
+        }
+      });
     }
     req.logIn(user, function(err) {
       if (err) return next(err);
-      return res.json({ success: 'You successfully logged in' });
+      res.format({
+        'application/json': function() {
+          return res.send(200, { error: 'Login successful' });
+        },
+        default: function() {
+          return res.redirect('/users/account');
+        }
+      });
     });
   })(req, res, next);
 };
