@@ -40,9 +40,15 @@ require('./app/util');
 
 // Start the app by listening on <port>
 var port = process.env.PORT || 3001
-app.listen(port)
+
+// Start Websockets and Express app
+//app.listen(port)
+var io = require('socket.io').listen(app.listen(port));
 
 console.log('Express app started on port '+port)
+
+// Websockets
+require('./app/ws')(io);
 
 // Expose app
 module.exports = app
