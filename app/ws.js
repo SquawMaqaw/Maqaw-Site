@@ -3,23 +3,16 @@
  */
 
 exports.assignToRepresentative = function(id) {
-  console.log("we in");
   for (var i = 0; i < peers.length; i++) {
     if (peers[i].id == id) peers[i].representative = true;
   }
-
-  console.log("new peers aftr assin to rep");
-  console.log(peers);
 
   for (var i = 0; i < sockets.length; i++) {
     var representatives = peers.filter(function(el) {
       return el.representative;
     }) || [];
 
-    console.log("representatives is");
-    console.log(representatives);
-
-    sockets[i].socket.emit('representatives', { msg: representatives });
+    sockets[i].socket.emit('representatives', { msg: representatives._toIds() });
   }
 };
 
@@ -28,44 +21,36 @@ exports.initWS = function(io) {
   sockets = [];
   dataConnections = [];
 
-  /*
-  var peers = require('./ws_data')[peers],
-      sockets = require('./ws_data')[sockets],
-      dataConnections = require('./ws_data')[dataConnections];
-  console.log("peers at top");
-  console.log(peers);
-  */
-
   io.set('log level', 0);
 
   // Add a new socket
   function addPeer(peer, peerSocket) {
-    console.log("peers in addPeer");
-    console.log(peers);
     peers.push(peer);
     sockets.push(peerSocket);
 
+    var visitors = getVisitors();
+    console.log("visitors list looks like");
+    console.log(visitors);
+
+    var representatives = getRepresentatives();
+    console.log("representatives looks like");
+    console.log(representatives);
+
     if (peer.representative) {
       // get back list of visitors
-      peerSocket.socket.emit('visitors', { msg: peers.filter(function(el) {
-        return !el.representative;
-      })});
+      peerSocket.socket.emit('visitors', { msg: visitors });
 
     } else {
       // get back list of reps
-      peerSocket.socket.emit('representatives', { msg: peers.filter(function(el) {
-        return el.representative;
-      })});
+      peerSocket.socket.emit('representatives', { msg: representatives });
 
       // let all reps know you exist
-      var representatives = sockets.filter(function(el) {
-        return el.representative;
-      });
       for (var i = 0; i < representatives.length; i++) {
-        representatives[i].socket.emit('visitors', peers.filter(function(el) {
-          return !el.representative;
-        }));
+        var representativeSocket = sockets._findById(representatives[i]);
+        if (representativeSocket) representativeSocket.socket.emit('visitors', { msg: visitors });
       }
+
+
     }
   }
 
@@ -90,20 +75,32 @@ exports.initWS = function(io) {
 
     // Start a data connection
     socket.on('connect', function(data) {
+      console.log("data inside connect");
+      console.log(data);
       var src = peers._findById(data.src);
-      var dst = peers._findById(data.dst);
+      var dst = peers._findById(data.dst.id);
 
-      var oneWay = { src: src, dst: dst };
-      var otherWay = { src: dst, dst: src };
+      console.log("src");
+      console.log(src);
+      console.log("dst");
+      console.log(dst);
 
-      dataConnections.push(oneWay);
-      dataConnections.push(otherWay);
+      if (!dst) {
+        console.log("destination does not exist");
+        socket.emit('error', { msg: 'Could not connect to peer' });
+      } else {
+        var oneWay = { src: src, dst: dst };
+        var otherWay = { src: dst, dst: src };
 
-      var dstSocket = sockets._findById(data.dst).socket;
-      dstSocket.emit('connection', otherWay);
+        dataConnections.push(oneWay);
+        dataConnections.push(otherWay);
 
-      var srcSocket = sockets._findById(data.src).socket;
-      srcSocket.emit('connection open');
+        var dstSocket = sockets._findById(data.dst.id).socket;
+        dstSocket.emit('connection', otherWay);
+
+        var srcSocket = sockets._findById(data.src).socket;
+        srcSocket.emit('connection open');
+      }
 
     });
 
@@ -139,13 +136,9 @@ exports.initWS = function(io) {
 
       sockets._forEach(function(peerSocket) {
         if (removed.representative) {
-          peerSocket.emit('representatives', peers.filter(function(el) {
-            return el.representative;
-          }));
+          peerSocket.emit('representatives', getRepresentatives());
         } else {
-          peerSocket.socket.emit('visitors', peers.filter(function(el) {
-            return !el.representative;
-          }));
+          peerSocket.socket.emit('getVisitorsitors', getVisitors());
         }
       });
     })
@@ -156,6 +149,40 @@ exports.initWS = function(io) {
     console.log("inside generate id");
     return Math.random().toString(36).substr(2);
   }
+
+  // Get the list of representatives
+  function getRepresentatives() {
+    var representatives = peers.filter(function(el) {
+      return el.representative;
+    });
+    console.log("the reps looks like");
+    console.log(representatives._toIds());
+    return representatives._toIds(); 
+  }
+
+  // Get the list of visitors
+  function getVisitors() {
+    var visitors = peers.filter(function(el) {
+      return !el.representative;
+    });
+    console.log("the visitors looks like");
+    console.log(visitors._toIds());
+    return visitors._toIds();    
+  }
+
+  // Convert an array of objects with IDs
+  // into an array of just IDs
+  Array.prototype._toIds = function() {
+    console.log("We are inside toIds");
+    var arr = [];
+    for (var i = 0; i < this.length; i++) {
+      arr.push(this[i].id);
+    }
+    console.log("the converted arr is");
+    console.log(arr);
+    return arr;
+  }
+
 
   // Find an element in an array (use underscore function??)
   Array.prototype._findById = function (id) {
