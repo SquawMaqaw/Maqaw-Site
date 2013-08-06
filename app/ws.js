@@ -80,11 +80,6 @@ exports.initWS = function(io) {
       var src = peers._findById(data.src);
       var dst = peers._findById(data.dst.id);
 
-      console.log("src");
-      console.log(src);
-      console.log("dst");
-      console.log(dst);
-
       if (!dst) {
         console.log("destination does not exist");
         socket.emit('error', { msg: 'Could not connect to peer' });

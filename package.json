@@ -29,7 +29,8 @@
     "jade": "latest",
     "async": "latest",
     "forever": "latest",
-    "socket.io": "latest"
+    "socket.io": "latest",
+    "node-inspector": "latest"
   },
   "devDependencies": {
     "nodemon": "latest",
