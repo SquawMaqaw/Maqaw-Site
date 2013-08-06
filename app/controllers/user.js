@@ -66,7 +66,10 @@ exports.login = function(req, res, next) {
     var id = req.body.user ? req.body.user.id : "undefined";
     var key = req.body.user ? req.body.user.key : "undefined";
 
+    console.log("before assign id to rep");
+    console.log(id);
     ws.assignToRepresentative(id);
+    console.log("after assign id to rep");
     
     // set the peer to be a rep and emit a change rep event
 
