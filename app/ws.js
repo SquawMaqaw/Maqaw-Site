@@ -24,6 +24,16 @@ exports.initWS = function(io) {
 
   io.set('log level', 0);
 
+  // Debug
+  function logging() {
+    console.log("peers:");
+    console.log(peers);
+    console.log("dataConnections");
+    console.log(dataConnections);
+    console.log("sockets");
+    console.log(sockets);
+  }
+
   // Add a new socket
   function addPeer(peer, peerSocket) {
     console.log("inside of addPeer");
@@ -52,7 +62,6 @@ exports.initWS = function(io) {
       for (var i = 0; i < representatives.length; i++) {
         var representativeSocket = sockets._findById(representatives[i].id);
         console.log("here is what the representative socket looks lik");
-        console.log(representativeSocket);
         if (representativeSocket) {
           emitVisitors(representativeSocket.socket);
           //representativeSocket.socket.emit('visitors', { msg: visitors });
@@ -80,8 +89,6 @@ exports.initWS = function(io) {
     // Start a data connection
     socket.on('connect', function(data) {
       console.log("inside connect");
-      console.log("peers");
-      console.log(peers);
       console.log("data");
       console.log(data);
 
@@ -89,24 +96,27 @@ exports.initWS = function(io) {
         console.log("destination does not exist");
         socket.emit('error', { msg: 'Could not connect to peer' });
       } else {
-        console.log("destination exists");
-        var oneWay = { src: data.src, dst: data.dst };
-        var otherWay = { src: data.dst, dst: data.src };
-
-        dataConnections.push(oneWay);
-        dataConnections.push(otherWay);
 
         var srcSocket = sockets._findById(data.src).socket;
 
-        if (!sockets._findById(data.dst)) {
+        if (!sockets._findById(data.dst) || data.src == data.dst) {
           console.log("no destination found");
-          emitVisitors();
+          emitVisitors(srcSocket);
 
         } else {
           console.log("destination found");
+
+          var oneWay = { src: data.src, dst: data.dst };
+          var otherWay = { src: data.dst, dst: data.src };
+
+          dataConnections.push(oneWay);
+          dataConnections.push(otherWay);
+
           var dstSocket = sockets._findById(data.dst).socket;
           dstSocket.emit('connection', otherWay);
-          srcSocket.emit('connection open');
+          dstSocket.emit('connection open', otherWay);
+          console.log("sending a connection open event");
+          srcSocket.emit('connection open', oneWay);
         }
 
 
@@ -116,21 +126,11 @@ exports.initWS = function(io) {
 
     // Send message through a data connection
     socket.on('send', function(data) {
-      console.log("data inside of send");
-      console.log(data);
-      var src = data.src;
-      var dataConnection = dataConnections._findBySrcId(src);
-      console.log("dataConnections");
-      console.log(dataConnections);
-      console.log("dataConnection");
-      console.log(dataConnection);
-      var dstId = dataConnection.dst;
-      console.log("dst");
-      var dstSocket = sockets._findById(dstId).socket;
-      console.log("We are sending a message to: " + dstId);
+      var dstSocket = sockets._findById(data.dst).socket;
+      console.log("We are sending a message to: " + data.dst);
       console.log("The message looks like:");
       console.log(data.message);
-      dstSocket.emit('data', data.message);
+      dstSocket.emit('data', { src: data.src, dst: data.dst, type: data.message.type, text: data.message.text });
     });
 
     // Send error notification
@@ -139,26 +139,40 @@ exports.initWS = function(io) {
     });
 
     // Send close notification
+    socket.on('close', function(data) {
+      console.log("closing src data connection");
+      socket.emit('close', { src: data.src, dst: data.dst });
+      console.log("closing dst data connection if exists");
+      if (sockets._findById(data.dst)) {
+        var dstSocket = sockets._findById(data.dst).socket;
+        dstSocket.emit('close', { src: data.dst, dst: data.src });
+      }
+    });
+
+    // Send disconnect notification
     socket.on('disconnect', function() {
       console.log("firing disconnect event");
       var peerId = socket.peerId;
       var removedConnection = false;
 
-      dataConnections._removeConn(peerId, function(connectedTo) {
-        connectedTo.emit('close', { message: 'User disconnected' });
-      });
+      if (peers._findById(peerId)) {
+        dataConnections._removeConn(peerId, function(connectedTo) {
+          connectedTo.emit('close', { message: 'User disconnected' });
+        });
 
-      var removed = peers._removePeer(peerId);
-      sockets._removePeer(peerId);
+        var removed = peers._removePeer(peerId);
+        sockets._removePeer(peerId);
 
-      sockets._forEach(function(peerSocket) {
-        if (removed.representative) {
-          emitRepresentatives(peerSocket.socket);
-        } else {
-          emitVisitors(peerSocket.socket);
-        }
-      });
-    })
+        sockets._forEach(function(peerSocket) {
+          if (removed.representative) {
+            emitRepresentatives(peerSocket.socket);
+          } else {
+            emitVisitors(peerSocket.socket);
+          }
+        });
+      }
+
+    });
   });
 
   // Generate a random ID
@@ -190,30 +204,6 @@ exports.initWS = function(io) {
     console.log(representativeIds);
     socket.emit('representatives', {msg: representativeIds });
   }
-
-  // Get the list of representatives
-  /*
-  function getRepresentatives() {
-    var representatives = peers.filter(function(el) {
-      return el.representative;
-    });
-    console.log("the reps looks like");
-    console.log(Array.toIds(representatives));
-    return Array.toIds(representatives); 
-  }
-  */
-
-  // Get the list of visitors
-  /*
-  function getVisitors() {
-    var visitors = peers.filter(function(el) {
-      return !el.representative;
-    });
-    console.log("the visitors looks like");
-    console.log(Array.toIds(visitors));
-    return Array.toIds(visitors);
-  }
-  */
 
   // Convert an array of objects with IDs
   // into an array of just IDs
