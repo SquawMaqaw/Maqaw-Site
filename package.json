@@ -28,7 +28,9 @@
     "view-helpers": "latest",
     "jade": "latest",
     "async": "latest",
-    "forever": "latest"
+    "forever": "latest",
+    "socket.io": "latest",
+    "node-inspector": "latest"
   },
   "devDependencies": {
     "nodemon": "latest",

@@ -26,7 +26,7 @@ $(function() {
     var querystring = decodeURIComponent($.param(paramsObj));
 
     $.ajax({
-      url: 'http://54.214.232.157:3000/register',
+      url: 'http://localhost:3001/register',
       method: 'POST',
       data: querystring,
       success: function(data) {
@@ -51,7 +51,7 @@ $(function() {
     var querystring = decodeURIComponent($.param(paramsObj));
 
     $.ajax({
-      url: 'http://54.214.232.157:3000/login',
+      url: 'http://localhost:3001/login',
       method: 'POST',
       data: querystring,
       success: function(data) {
