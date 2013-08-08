@@ -124,6 +124,12 @@ exports.initWS = function(io) {
 
     });
 
+    socket.on('poll', function(data) {
+      if (data === 'VISITORS') {
+        emitVisitors(socket);
+      }
+    });
+
     // Send message through a data connection
     socket.on('send', function(data) {
       var dstSocket = sockets._findById(data.dst).socket;
