@@ -2,26 +2,21 @@
  * Websockets
  */
 
+var _  = require('underscore');
+
 exports.assignToRepresentative = function(id) {
-  for (var i = 0; i < peers.length; i++) {
-    if (peers[i].id == id) peers[i].representative = true;
-  }
+  peers[id].representative = true;
 
-  for (var i = 0; i < sockets.length; i++) {
-    var representatives = peers.filter(function(el) {
-      return el.representative;
-    }) || [];
-
-    sockets[i].socket.emit('representatives', { msg: Array.toIds(representatives) });
-    //emitRepresentatives(sockets[i].socket);
-  }
+  var visitors = _.filter(peers, function(el) {
+    return !el.representative;
+  });
+  
+  var visitorIds = _.map(visitors, function(visitor){ return visitor.id });
+  //peers[id].socket.emit('visitors', {msg: visitorIds });
 };
 
 exports.initWS = function(io) {
-  peers = [];
-  sockets = [];
-  dataConnections = [];
-
+  peers = {};
   io.set('log level', 0);
 
   // Debug
@@ -35,40 +30,19 @@ exports.initWS = function(io) {
   }
 
   // Add a new socket
-  function addPeer(peer, peerSocket) {
-    console.log("inside of addPeer");
-    peers.push(peer);
-    sockets.push(peerSocket);
-
+  function addPeer(peer) {
+    // MISNAMED ~~~~~////
     if (peer.representative) {
       // get back list of visitors
-      console.log("the peer is a rep, so emit visitors")
-      emitVisitors(peerSocket.socket);
-      console.log("finished emitting visitors");
-      //peerSocket.socket.emit('visitors', { msg: visitors });
-
+      emitVisitors(peer.socket);
     } else {
       // get back list of reps
-      //peerSocket.socket.emit('representatives', { msg: representatives });
-      console.log("get back a list of reps");
-      emitRepresentatives(peerSocket.socket);
-
-      var representatives = peers.filter(function(el) {
-        return el.representative;
-      });
-      console.log("here is the list of reps");
-      console.log(representatives);
+      emitRepresentatives(peer.socket);
+      var representatives = _.where(peers, { representative: true });
       // let all reps know you exist
-      for (var i = 0; i < representatives.length; i++) {
-        var representativeSocket = sockets._findById(representatives[i].id);
-        console.log("here is what the representative socket looks lik");
-        if (representativeSocket) {
-          emitVisitors(representativeSocket.socket);
-          //representativeSocket.socket.emit('visitors', { msg: visitors });
-        }
-      }
-
-
+      _.each(representatives, function(representative) {
+        emitVisitors(representative.socket); 
+      }); 
     }
   }
 
@@ -76,52 +50,49 @@ exports.initWS = function(io) {
 
     // Initialize the connection
     socket.on('init connect', function(data) {
-      if (!data.id) data.id = generateID(); // Generate ID for user
-      socket.peerId = data.id;
-
+      if (!data.id) {
+        data.id = generateID(); // Generate ID for user
+      }
       socket.emit('peer open', data.id);
+      socket.peerId = data.id;
+      peers[data.id] = { 
+        id: data.id, 
+        representative: data.representative, 
+        socket: socket, 
+        connections: []
+      };
 
-      var peerSocket = { id: data.id, representative: data.representative, socket: socket };
-      addPeer(data, peerSocket);
-
+      addPeer(peers[data.id]);
     });
 
     // Start a data connection
     socket.on('connect', function(data) {
-      console.log("inside connect");
-      console.log("data");
-      console.log(data);
 
       if (!data.dst) {
-        console.log("destination does not exist");
         socket.emit('error', { msg: 'Could not connect to peer' });
       } else {
 
-        var srcSocket = sockets._findById(data.src).socket;
+        var srcPeerObject = peers[data.src]; 
+        var srcSocket = srcPeerObject.socket;
+        var dstPeerObject = peers[data.dst];
 
-        if (!sockets._findById(data.dst) || data.src == data.dst) {
-          console.log("no destination found");
+        if (!dstPeerObject || data.src === data.dst) {
+          // Re emit the visitors list 
           emitVisitors(srcSocket);
-
         } else {
-          console.log("destination found");
+          
+          // Add two way connection to the connection objects
+          peers[data.src].connections.push(data.dst);
+          peers[data.dst].connections.push(data.src); 
+          
+          var dstSocket = dstPeerObject.socket 
 
-          var oneWay = { src: data.src, dst: data.dst };
-          var otherWay = { src: data.dst, dst: data.src };
+          dstSocket.emit('connection', {src: data.dst, dst: data.src });
+          dstSocket.emit('connection open', {src: data.dst, dst: data.src });
 
-          dataConnections.push(oneWay);
-          dataConnections.push(otherWay);
-
-          var dstSocket = sockets._findById(data.dst).socket;
-          dstSocket.emit('connection', otherWay);
-          dstSocket.emit('connection open', otherWay);
-          console.log("sending a connection open event");
-          srcSocket.emit('connection open', oneWay);
+          srcSocket.emit('connection open', {src: data.src, dst: data.dst });
         }
-
-
       }
-
     });
 
     socket.on('poll', function(data) {
@@ -132,10 +103,7 @@ exports.initWS = function(io) {
 
     // Send message through a data connection
     socket.on('send', function(data) {
-      var dstSocket = sockets._findById(data.dst).socket;
-      console.log("We are sending a message to: " + data.dst);
-      console.log("The message looks like:");
-      console.log(data.message);
+      var dstSocket = peers[data.dst].socket;
       dstSocket.emit('data', { src: data.src, dst: data.dst, type: data.message.type, text: data.message.text });
     });
 
@@ -146,11 +114,11 @@ exports.initWS = function(io) {
 
     // Send close notification
     socket.on('close', function(data) {
-      console.log("closing src data connection");
       socket.emit('close', { src: data.src, dst: data.dst });
-      console.log("closing dst data connection if exists");
-      if (sockets._findById(data.dst)) {
-        var dstSocket = sockets._findById(data.dst).socket;
+      var dstPeerObject = _.findWhere(peers, data.dst); 
+
+      if (dstPeerObject) {
+        var dstSocket = dstPeerObject.socket;
         dstSocket.emit('close', { src: data.dst, dst: data.src });
       }
     });
@@ -161,23 +129,26 @@ exports.initWS = function(io) {
       var peerId = socket.peerId;
       var removedConnection = false;
 
-      if (peers._findById(peerId)) {
-        dataConnections._removeConn(peerId, function(connectedTo) {
-          connectedTo.emit('close', { message: 'User disconnected' });
-        });
+      var peer = peers[socket.peerId];
+      var peerConnections = peer.connections;    
 
-        var removed = peers._removePeer(peerId);
-        sockets._removePeer(peerId);
+      _.each(peerConnections, function(connection) {
+          var peerConnection = peers[connection];
 
-        sockets._forEach(function(peerSocket) {
-          if (removed.representative) {
-            emitRepresentatives(peerSocket.socket);
-          } else {
-            emitVisitors(peerSocket.socket);
-          }
-        });
-      }
+          peerConnection.socket.emit('close', { data: { src: peerId, dst: connection }});
+          peerConnection.connections = _.without(peerConnection.connections, peerId);
+           
+      });
+             
+      peers = _.omit(peers, peerId); 
 
+      _.each(peer.connections, function(peerConnection) {
+        if (peer.representative) {
+          emitRepresentatives(peers[peerConnection].socket);
+        } else {
+          emitVisitors(peers[peerConnection].socket);
+        }
+      });   
     });
   });
 
@@ -189,81 +160,22 @@ exports.initWS = function(io) {
 
   // Emit the list of visitors
   function emitVisitors(socket) {
-    var visitors = peers.filter(function(el) {
+
+    var visitors = _.filter(peers, function(el) {
       return !el.representative;
     });
-    var visitorIds = Array.toIds(visitors);
-    console.log("visitors");
-    console.log(visitors);
-    console.log("visitorIds");
-    console.log(visitorIds);
+
+    var visitorIds = _.map(visitors, function(visitor){ return visitor.id });
     socket.emit('visitors', { msg: visitorIds });
   }
 
   // Emit the list of representatives
   function emitRepresentatives(socket) {
-    var representatives = peers.filter(function(el) {
+    var representatives = _.filter(peers, function(el) {
       return el.representative;
     });
-    var representativeIds = Array.toIds(representatives);
-    console.log("repIds");
-    console.log(representativeIds);
+    
+    var representativeIds = _.map(representatives, function(rep){ return rep.id });
     socket.emit('representatives', {msg: representativeIds });
-  }
-
-  // Convert an array of objects with IDs
-  // into an array of just IDs
-  Array.toIds = function(arr) {
-    var newArr = [];
-    for (var i = 0; i < arr.length; i++) {
-      newArr.push(arr[i].id);
-    }
-    return newArr;
-  }
-
-
-  // Find an element in an array (use underscore function??)
-  Array.prototype._findById = function (id) {
-    for (var i = 0; i < this.length; i++) {
-      if (this[i].id == id) return this[i];
-    }
-  };
-
-  // Find an element by the src id
-  Array.prototype._findBySrcId = function(id) {
-    for (var i = 0; i < this.length; i++) {
-      if (this[i].src == id) return this[i];
-    }
-  };
-
-  // Remove an element in an array with a certain ID
-  Array.prototype._removePeer = function(id, cb) {
-    var removed;
-    for (var i = this.length - 1; i >= 0; i--) {
-      if (this[i].id == id) {
-        removed = this[i]
-        this.splice(i, 1);
-      }
-    }
-    return removed;
-  };
-
-  // Remove an element in an array with data connections
-  Array.prototype._removeConn = function(id, cb) {
-    for (var i = this.length - 1; i >= 0; i--) {
-      if (this[i].src.id == id && cb) {
-        var dstSocket = sockets._findById(this[i].dst.id).socket;
-        cb(dstSocket);
-      }
-
-      if (this[i].src.id == id || this[i].dst.id == id) this.splice(i, 1);
-    }
-  }
-
-  // Asynch for each with callback
-  Array.prototype._forEach = function(cb) {
-    for (var i = 0; i < this.length; i++) {
-      cb(this[i]);
-    }
   }
 };

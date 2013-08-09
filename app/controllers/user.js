@@ -68,7 +68,6 @@ exports.login = function(req, res, next) {
 
     console.log("before assign id to rep");
     console.log(id);
-    ws.assignToRepresentative(id);
     console.log("after assign id to rep");
     
     // set the peer to be a rep and emit a change rep event
@@ -92,7 +91,8 @@ exports.login = function(req, res, next) {
       if (err) return next(err);
       res.format({
         'application/json': function() {
-          return res.send(200, { success: 'Login successful', key: user._id, name: user.company });
+          res.send(200, { success: 'Login successful', key: user._id, name: user.company });
+          return ws.assignToRepresentative(id);
         },
         default: function() {
           return res.redirect('/users/account');
