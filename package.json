@@ -30,7 +30,8 @@
     "async": "latest",
     "forever": "latest",
     "socket.io": "latest",
-    "node-inspector": "latest"
+    "node-inspector": "latest",
+    "underscore": "latest"
   },
   "devDependencies": {
     "nodemon": "latest",
