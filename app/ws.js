@@ -105,6 +105,8 @@ exports.initWS = function(io) {
     socket.on('send', function(data) {
       var dstSocket = peers[data.dst].socket;
       dstSocket.emit('data', { src: data.src, dst: data.dst, type: data.message.type, text: data.message.text });
+      console.log("peers");
+      console.log(peers);
     });
 
     // Send error notification
@@ -114,12 +116,16 @@ exports.initWS = function(io) {
 
     // Send close notification
     socket.on('close', function(data) {
-      socket.emit('close', { src: data.src, dst: data.dst });
+      //socket.emit('close', { src: data.src, dst: data.dst });
       var dstPeerObject = _.findWhere(peers, data.dst); 
+      console.log("after findWhere");
+      console.log(peers);
+      console.log("the dst peer is");
+      console.log(data.dst);
 
       if (dstPeerObject) {
         var dstSocket = dstPeerObject.socket;
-        dstSocket.emit('close', { src: data.dst, dst: data.src });
+        //dstSocket.emit('close', { src: data.dst, dst: data.src });
       }
     });
 
@@ -132,10 +138,12 @@ exports.initWS = function(io) {
       var peer = peers[socket.peerId];
       var peerConnections = peer.connections;    
 
+      // Send each peer connection a close event
       _.each(peerConnections, function(connection) {
           var peerConnection = peers[connection];
 
-          peerConnection.socket.emit('close', { data: { src: peerId, dst: connection }});
+          //peerConnection.socket.emit('close', { data: { src: peerId, dst: connection }});
+          //peer.socket.emit('close', { data: { src: connection, dst: peerId }});
           peerConnection.connections = _.without(peerConnection.connections, peerId);
            
       });
@@ -149,6 +157,9 @@ exports.initWS = function(io) {
           emitVisitors(peers[peerConnection].socket);
         }
       });   
+
+
+
     });
   });
 
