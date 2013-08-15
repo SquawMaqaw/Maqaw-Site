@@ -1,3 +1,627 @@
+var MAQAW_MIRROR_ENUMS = {
+  SHARE_SCREEN: 0, 
+  SHARE_SCREEN_OK: 1,
+  SHARE_SCREEN_REFUSE: 2,
+  SCREEN_DATA: 3,
+  MOUSE_MOVE: 4,
+  MOUSE_CLICK: 5,
+  SCROLL: 6,
+  INPUT: 7,
+  SIZE_REQUEST: 8,
+  SIZE: 9
+};
+
+function Mirror(options) {
+  // stores connection object if exists
+  this.conn = options && options.conn;
+  this.base;
+
+  this.mirrorDocument;
+  this.mirrorWindow;
+  this.mouseMirror;
+  this.inputMirror;
+
+  // whether or not we are currently viewing our peer's screen
+  this.isViewingScreen = false;
+
+}
+
+/*
+ * Called when the connection to our peer is reset
+ */
+Mirror.prototype.connectionReset = function () {
+   // if we were watching our peer's screen, tell that to start sending screen
+   //data again
+    if(this.mirrorWindow && !this.mirrorWindow.closed){
+        this.requestScreen();
+    }
+};
+
+Mirror.prototype.data = function(_data) {
+  //
+  // handle new data. For a new share screen
+  // request, function opens a new mirror
+  // for all other requests, function passes
+  // data to mirrorScreen
+  //
+  switch(_data.request) {
+    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN:
+      // Request from peer to view this screen  
+      this.conn.send({ type: MAQAW_DATA_TYPE.SCREEN, request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK });
+      this.shareScreen();
+      break;
+    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK:
+      //  Share screen request received and 
+      //  validated open a screen mirror 
+      this.openMirror();
+      break;
+    case MAQAW_MIRROR_ENUMS.SCREEN_DATA:
+      //  Screen Data.
+    case MAQAW_MIRROR_ENUMS.MOUSE_CLICK:
+      // Mouse click event
+    case MAQAW_MIRROR_ENUMS.MOUSE_MOVE:
+      // Mouse move event
+    case MAQAW_MIRROR_ENUMS.INPUT:
+      // Interactions with input elements
+      this.mirrorScreen(_data);  
+      break;
+    case MAQAW_MIRROR_ENUMS.SCROLL:
+      this.mirrorWindow.scrollTo(_data.left, _data.top);
+      break;
+    case MAQAW_MIRROR_ENUMS.SIZE:
+      this.mirrorDocument.body.style.width = _data.width;
+      break;
+    case MAQAW_MIRROR_ENUMS.SIZE_REQUEST:
+      this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.SIZE,
+        width: document.body.clientWidth
+      });
+      break;
+    default:
+      // Unknown
+      break;
+  }
+};
+
+Mirror.prototype.openMirror = function() {
+  var _this = this;
+
+  // if we are already viewing the screen, don't open a new window
+    if(!this.isViewingScreen) {
+         this.mirrorWindow = window.open();
+         this.mirrorDocument = this.mirrorWindow.document;
+
+        // attach a listener for if the window is closed
+        this.mirrorWindow.addEventListener('unload', function() {
+            // TODO: implement me
+            _this.isViewingScreen = false;
+        }, false);
+
+        // request dimensions for body
+        _this.conn.send({
+            type: MAQAW_DATA_TYPE.SCREEN,
+            request: MAQAW_MIRROR_ENUMS.SIZE_REQUEST
+        });
+
+    }
+
+    this.isViewingScreen = true;
+
+  this._mirror = new TreeMirror(this.mirrorDocument, {
+    createElement: function(tagName) {
+      if (tagName == 'SCRIPT') {
+        var node = _this.mirrorDocument.createElement('NO-SCRIPT');
+        node.style.display = 'none';
+        return node;
+      }
+
+      if (tagName == 'HEAD') {
+        var node = _this.mirrorDocument.createElement('HEAD');
+        node.appendChild(_this.mirrorDocument.createElement('BASE'));
+        node.firstChild.href = _this.base;
+        return node;
+      }
+    }
+  });
+  
+  this.mouseMirror = new MouseMirror(this.mirrorDocument, {
+    mousemove: function(event) {
+      _this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
+        coords: {x: event.pageX, y: event.pageY}
+      });
+    }, 
+    click: function(event) {
+        _this.conn.send({
+            type: MAQAW_DATA_TYPE.SCREEN,
+            request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
+            coords: {x: event.pageX, y: event.pageY},
+            target: maqawGetNodeHierarchy(_this.mirrorDocument, event.target)
+        });
+    },
+    rep: true
+  });
+
+  this.inputMirror = new MaqawInputMirror(this.mirrorDocument, {
+      multipleSelect: function(){
+          // get list of selected options
+          var selectedOptions = [];
+          for(var j = 0; j < this.selectedOptions.length; j++){
+              selectedOptions.push(this.selectedOptions[j].text);
+          }
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              selectedOptions: selectedOptions
+          });
+      },
+      singleSelect: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              selectedIndex: this.selectedIndex
+          });
+      }
+          ,
+      inputDefault: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              text: this.value
+          });
+      }
+          ,
+      radioAndCheckbox: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              checked: this.checked
+          });
+      }
+  });
+};
+
+Mirror.prototype.setConnection = function(conn) {
+  // set a connection if established later
+  this.conn = conn;
+};
+
+Mirror.prototype.requestScreen = function() {
+  //
+  //  Sends share screen request to peer
+  //
+  if (this.conn) {
+    this.conn.send({ 
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN
+    });
+  }
+};
+
+Mirror.prototype.shareScreen = function() {
+  //
+  // streams screen to peer
+  //
+  var _this = this;
+  if (this.conn) {
+
+    this.conn.send({
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+      clear: true 
+    });
+
+    this.conn.send({
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+      base: location.href.match(/^(.*\/)[^\/]*$/)[1] 
+    });
+
+    var mirrorClient = new TreeMirrorClient(document, {
+
+      initialize: function(rootId, children) {
+        _this.conn.send({
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+          f: 'initialize',
+          args: [rootId, children]
+        });
+      },
+
+      applyChanged: function(removed, addedOrMoved, attributes, text) {
+        _this.conn.send({
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+          f: 'applyChanged',
+          args: [removed, addedOrMoved, attributes, text]
+        });
+      }
+    });
+
+    // remove old mouse mirror if applicable so there isn't a duplicate cursor
+    // from two screen sharing sessions
+
+    this.mouseMirror = new MouseMirror(document, {
+      mousemove: function(event) {
+        _this.conn.send({ 
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
+          coords: {x: event.pageX, y: event.pageY}
+        });
+      }, 
+      click: function(event) {
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
+              coords: {x: event.pageX, y: event.pageY},
+              target: maqawGetNodeHierarchy(document, event.target)
+          });
+      }
+    });
+  
+    // Set up scroll listener
+    window.addEventListener('scroll', scrollListener, false);
+    function scrollListener(){
+      var top = window.pageYOffset;
+      var left = window.pageXOffset;
+      _this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.SCROLL,
+        top: top,
+        left: left
+      });
+    }
+
+
+
+    /* Set up listeners to input events */
+      this.inputMirror = new MaqawInputMirror(document, {
+          multipleSelect: function(){
+              // get list of selected options
+              var selectedOptions = [];
+              for(var j = 0; j < this.selectedOptions.length; j++){
+                  selectedOptions.push(this.selectedOptions[j].text);
+              }
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  selectedOptions: selectedOptions
+              });
+          },
+          singleSelect: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  selectedIndex: this.selectedIndex
+              });
+          }
+          ,
+          inputDefault: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  text: this.value
+              });
+          }
+          ,
+          radioAndCheckbox: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  checked: this.checked
+              });
+          }
+      });
+
+      // listener for window resize
+      var oldResize = window.onresize;
+      function newResize (){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.SIZE,
+              width: document.body.clientWidth
+          });
+
+          // call the old resize function as well if we overwrote one
+          if(oldResize){
+              oldResize();
+          }
+      }
+      window.onresize = newResize;
+
+  } else {
+    console.log("Error: Connection not established. Unable to stream screen");
+  }
+};
+
+Mirror.prototype.mirrorScreen = function(data) {
+  var _this = this;
+
+  function clearPage() {
+    // clear page //
+    while (_this.mirrorDocument.firstChild) {
+      _this.mirrorDocument.removeChild(_this.mirrorDocument.firstChild);
+    }
+  }
+
+  function handleMessage(msg) {
+    if (msg.clear){
+      clearPage();
+    }
+    else if (msg.base){
+      _this.base = msg.base;
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.SCREEN_DATA){
+      _this._mirror[msg.f].apply(_this._mirror, msg.args);
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE || msg.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK){
+        _this.mouseMirror.data(msg);
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.INPUT) {
+      _this.inputMirror.data(msg);
+    }
+  }
+
+  var msg = data;
+  if (msg instanceof Array) {
+    msg.forEach(function(subMessage) {
+      handleMessage(JSON.parse(subMessage));
+    });
+  } else {
+    handleMessage(msg);
+  }
+};
+
+function MouseMirror(doc, options) {
+  this.CURSOR_RADIUS = 10;
+  this.moveEvent = options.mousemove;
+  this.clickEvent = options.click;
+  this.doc = doc;
+  var _this = this;
+  this.isRep = Boolean(options.rep);
+
+    // keep track of the last element that was clicked on
+  this.lastElementClicked;
+
+  this.cursor = this.doc.createElement('div'); 
+  this.cursor.style.backgroundImage = "url('http://gohapuna.com/wp/wp-content/uploads/2013/08/cursor.png')";
+  this.cursor.style.height = '30px';
+  this.cursor.style.width = '20px';
+  this.cursor.style.zIndex = 10000;
+  this.cursor.style.position = 'absolute';
+  this.cursor.style.top = '0px';
+  this.cursor.style.left = '0px';
+  this.cursor.setAttribute("ignore", "true");
+
+    // maximum number of times per second mouse movement data will be sent
+    var MAX_SEND_RATE = 40;
+    // has enough time elapsed to send data again?
+    var isMouseTimeUp = true;
+    function moveMouse(event){
+      if(isMouseTimeUp){
+          _this.moveEvent(event);
+          isMouseTimeUp = false;
+          setTimeout(function(){isMouseTimeUp = true;}, 1000 / MAX_SEND_RATE);
+      }
+    }
+
+
+  this.doc.addEventListener('mousemove', moveMouse, false);
+  this.doc.addEventListener('click', this.clickEvent, false);
+
+
+  this.isDrawn = false;
+
+  return this;
+}
+
+MouseMirror.prototype.data = function(_data) {
+
+  if (!this.isDrawn) {
+    //  Hack that appends cursor only  
+    //  once a document.body exists
+    if (this.doc.body) {
+      this.doc.body.appendChild(this.cursor);
+      this.isDrawn = true;
+    }
+  }
+
+  if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE) {
+    this.moveMouse(_data);
+  } else if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK) {
+    this.clickMouse(_data);
+  }
+
+};
+
+MouseMirror.prototype.moveMouse = function(_data) {
+  this.cursor.style.top = _data.coords.y + 'px';
+  this.cursor.style.left = _data.coords.x + 'px';
+};
+
+MouseMirror.prototype.clickMouse = function(_data) {
+    var x = _data.coords.x;
+    var y = _data.coords.y;
+    var _this = this;
+
+    // get the clicked element
+    var target = maqawGetNodeFromHierarchy(this.doc, _data.target);
+    // remove highlight from last clicked element
+    if(this.lastElementClicked){
+        if(this.isRep){
+            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element-rep\b/,'');
+        }
+        else {
+            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element\b/,'');
+        }
+    }
+    // highlight the element that was clicked if it wasn't the body
+    if(target.tagName !== 'BODY'){
+        if(this.isRep){
+            target.className = target.className + ' maqaw-mirror-clicked-element-rep';
+        } else {
+            target.className = target.className + ' maqaw-mirror-clicked-element';
+        }
+        this.lastElementClicked = target;
+    }
+
+
+    function makeExpandingRing(){
+        var radius = 1;
+        var click = _this.doc.createElement('div');
+        click.style.width = 2*radius + 'px';
+        click.style.height = 2*radius + 'px';
+        click.style.backgroundColor = 'transparent';
+        click.style.border = '2px solid rgba(255, 255, 0, 1)';
+        click.style.borderRadius = '999px';
+        click.style.zIndex = 10000;
+        click.style.position = 'absolute';
+        click.style.top = y - radius + 'px';
+        click.style.left = x - radius + 'px';
+        click.setAttribute("ignore", "true");
+        _this.doc.body.appendChild(click);
+
+        var rate = 50;
+        var radiusIncrease = 2;
+        var transparency = 1;
+        var transparencyRate = .03;
+
+        (function expand() {
+            radius += radiusIncrease;
+            transparency -= transparencyRate;
+            click.style.border = '2px solid rgba(255, 255, 0, ' + transparency + ')';
+            click.style.width = 2*radius + 'px';
+            click.style.height = 2*radius + 'px';
+            click.style.top = y - radius + 'px';
+            click.style.left = x - radius + 'px';
+
+            if(transparency > 0){
+                setTimeout(expand, rate);
+            } else {
+                _this.doc.body.removeChild(click);
+            }
+        })();
+    }
+
+    var numRings = 6;
+    var ringSpacing = 300;
+    var ringCounter = 0;
+
+    function doRings (){
+        if(ringCounter < numRings){
+            makeExpandingRing();
+            ringCounter++;
+            setTimeout(doRings, ringSpacing);
+        }
+    }
+};
+
+MouseMirror.prototype.off = function() {
+  this.doc.removeEventListener('mousemove', this.moveEvent, false);
+  this.doc.removeEventListener('click', this.clickEvent, false);
+};
+
+
+/*
+ * Attach listeners to input elements so that they can be mirrored.
+ * doc - The document to search for input elements
+ * conn - The connection to use to send mirror updates about the inputs
+ */
+function MaqawInputMirror(doc, options){
+    this.doc = doc;
+    var _this = this;
+
+    this.radioAndCheckbox = options.radioAndCheckbox;
+    this.singleSelect = options.singleSelect;
+    this.multipleSelect = options.multipleSelect;
+    this.inputDefault = options.inputDefault;
+
+    function keyUpEvent(event){
+        var target = event.target;
+        if(target.tagName === 'INPUT'){
+            (_this.inputDefault.bind(target))();
+        }
+
+        else if(target.tagName === 'TEXTAREA'){
+            (_this.inputDefault.bind(target))();
+        }
+    }
+
+    function changeEvent(event){
+        var target = event.target;
+        if(target.tagName === 'INPUT'){
+            if(target.type === 'radio' || target.type === 'checkbox'){
+                (_this.radioAndCheckbox.bind(target))();
+            } else {
+                (_this.inputDefault.bind(target))();
+            }
+        }
+
+        else if(target.tagName === 'SELECT'){
+            if(target.type === 'select-one'){
+                (_this.singleSelect.bind(target))();
+            } else if(target.type === 'select-multiple'){
+                (_this.multipleSelect.bind(target))();
+            }
+        }
+    }
+
+    this.doc.addEventListener('keyup', keyUpEvent, false);
+    this.doc.addEventListener('change', changeEvent, false);
+}
+
+MaqawInputMirror.prototype.data = function(data){
+    // get the DOM node that was changed
+    var inputNode = maqawGetNodeFromHierarchy(this.doc, data.index);
+
+    // set the checked attribute if applicable
+    if(typeof data.checked !== 'undefined'){
+        inputNode.checked = data.checked;
+    }
+
+    // check for select options
+    else if (typeof data.selectedIndex !== 'undefined'){
+        inputNode.selectedIndex = data.selectedIndex;
+    }
+
+    // check for multiple select options
+    else if (typeof data.selectedOptions !== 'undefined'){
+        var i, option, length = inputNode.options.length, selectedOptions = data.selectedOptions,
+            optionsList = inputNode.options;
+        for (i = 0; i < length; i++ ) {
+            option = optionsList[i];
+            var index = selectedOptions.indexOf(option.text);
+            if(index !== -1){
+                option.selected = true;
+            } else {
+                option.selected = false;
+            }
+
+        }
+    }
+
+    // otherwise set text value
+    else {
+        inputNode.value = data.text;
+    }
+};
+
+MaqawInputMirror.prototype.off = function() {
+    this.doc.removeEventListener('keyup', this.inputDefault, false);
+    this.doc.removeEventListener('change', this.radioAndCheckbox, false);
+    this.doc.removeEventListener('change', this.singleSelect, false);
+    this.doc.removeEventListener('change', this.multipleSelect, false);
+};
 // Copyright 2011 Google Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -321,629 +945,6 @@ TreeMirrorClient.prototype = {
     changed.removed.forEach(this.forgetNode, this);
   }
 }
-var MAQAW_MIRROR_ENUMS = {
-  SHARE_SCREEN: 0, 
-  SHARE_SCREEN_OK: 1,
-  SHARE_SCREEN_REFUSE: 2,
-  SCREEN_DATA: 3,
-  MOUSE_MOVE: 4,
-  MOUSE_CLICK: 5,
-  SCROLL: 6,
-  INPUT: 7,
-  SIZE_REQUEST: 8,
-  SIZE: 9
-};
-
-function Mirror(options) {
-  // stores connection object if exists
-  this.conn = options && options.conn;
-  this.base;
-
-  this.mirrorDocument;
-  this.mirrorWindow;
-  this.mouseMirror;
-  this.inputMirror;
-
-  // whether or not we are currently viewing our peer's screen
-  this.isViewingScreen = false;
-
-}
-
-/*
- * Called when the connection to our peer is reset
- */
-Mirror.prototype.connectionReset = function () {
-   // if we were watching our peer's screen, tell that to start sending screen
-   //data again
-    if(this.mirrorWindow && !this.mirrorWindow.closed){
-        this.requestScreen();
-    }
-};
-
-Mirror.prototype.data = function(_data) {
-  //
-  // handle new data. For a new share screen
-  // request, function opens a new mirror
-  // for all other requests, function passes
-  // data to mirrorScreen
-  //
-  switch(_data.request) {
-    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN:
-      // Request from peer to view this screen  
-      this.conn.send({ type: MAQAW_DATA_TYPE.SCREEN, request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK });
-      this.shareScreen();
-      break;
-    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK:
-      //  Share screen request received and 
-      //  validated open a screen mirror 
-      this.openMirror();
-      break;
-    case MAQAW_MIRROR_ENUMS.SCREEN_DATA:
-      //  Screen Data.
-    case MAQAW_MIRROR_ENUMS.MOUSE_CLICK:
-      // Mouse click event
-    case MAQAW_MIRROR_ENUMS.MOUSE_MOVE:
-      // Mouse move event
-    case MAQAW_MIRROR_ENUMS.INPUT:
-      // Interactions with input elements
-      this.mirrorScreen(_data);  
-      break;
-    case MAQAW_MIRROR_ENUMS.SCROLL:
-      this.mirrorWindow.scrollTo(_data.left, _data.top);
-      break;
-    case MAQAW_MIRROR_ENUMS.SIZE:
-      this.mirrorDocument.body.style.width = _data.width;
-      break;
-    case MAQAW_MIRROR_ENUMS.SIZE_REQUEST:
-      this.conn.send({
-        type: MAQAW_DATA_TYPE.SCREEN,
-        request: MAQAW_MIRROR_ENUMS.SIZE,
-        width: document.body.clientWidth
-      });
-      break;
-    default:
-      // Unknown
-      break;
-  }
-};
-
-Mirror.prototype.openMirror = function() {
-  var _this = this;
-
-  // if we are already viewing the screen, don't open a new window
-    if(!this.isViewingScreen) {
-         this.mirrorWindow = window.open();
-         this.mirrorDocument = this.mirrorWindow.document;
-
-        // attach a listener for if the window is closed
-        this.mirrorWindow.addEventListener('unload', function() {
-            // TODO: implement me
-            _this.isViewingScreen = false;
-        }, false);
-
-        // request dimensions for body
-        _this.conn.send({
-            type: MAQAW_DATA_TYPE.SCREEN,
-            request: MAQAW_MIRROR_ENUMS.SIZE_REQUEST
-        });
-
-    }
-
-    this.isViewingScreen = true;
-
-
-  this._mirror = new TreeMirror(this.mirrorDocument, {
-    createElement: function(tagName) {
-      if (tagName == 'SCRIPT') {
-        var node = _this.mirrorDocument.createElement('NO-SCRIPT');
-        node.style.display = 'none';
-        return node;
-      }
-
-      if (tagName == 'HEAD') {
-        var node = _this.mirrorDocument.createElement('HEAD');
-        node.appendChild(_this.mirrorDocument.createElement('BASE'));
-        node.firstChild.href = _this.base;
-        return node;
-      }
-    }
-  });
-  
-  this.mouseMirror = new MouseMirror(this.mirrorDocument, {
-    mousemove: function(event) {
-      _this.conn.send({
-        type: MAQAW_DATA_TYPE.SCREEN,
-        request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
-        coords: {x: event.pageX, y: event.pageY}
-      });
-    }, 
-    click: function(event) {
-        _this.conn.send({
-            type: MAQAW_DATA_TYPE.SCREEN,
-            request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
-            coords: {x: event.pageX, y: event.pageY},
-            target: maqawGetNodeHierarchy(_this.mirrorDocument, event.target)
-        });
-    },
-    rep: true
-  });
-
-  this.inputMirror = new MaqawInputMirror(this.mirrorDocument, {
-      multipleSelect: function(){
-          // get list of selected options
-          var selectedOptions = [];
-          for(var j = 0; j < this.selectedOptions.length; j++){
-              selectedOptions.push(this.selectedOptions[j].text);
-          }
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.INPUT,
-              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
-              selectedOptions: selectedOptions
-          });
-      },
-      singleSelect: function(){
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.INPUT,
-              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
-              selectedIndex: this.selectedIndex
-          });
-      }
-          ,
-      inputDefault: function(){
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.INPUT,
-              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
-              text: this.value
-          });
-      }
-          ,
-      radioAndCheckbox: function(){
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.INPUT,
-              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
-              checked: this.checked
-          });
-      }
-  });
-};
-
-Mirror.prototype.setConnection = function(conn) {
-  // set a connection if established later
-  this.conn = conn;
-};
-
-Mirror.prototype.requestScreen = function() {
-  //
-  //  Sends share screen request to peer
-  //
-  if (this.conn) {
-    this.conn.send({ 
-      type: MAQAW_DATA_TYPE.SCREEN,
-      request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN
-    });
-  }
-};
-
-Mirror.prototype.shareScreen = function() {
-  //
-  // streams screen to peer
-  //
-  var _this = this;
-  if (this.conn) {
-
-    this.conn.send({
-      type: MAQAW_DATA_TYPE.SCREEN,
-      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
-      clear: true 
-    });
-
-    this.conn.send({
-      type: MAQAW_DATA_TYPE.SCREEN,
-      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
-      base: location.href.match(/^(.*\/)[^\/]*$/)[1] 
-    });
-
-    var mirrorClient = new TreeMirrorClient(document, {
-
-      initialize: function(rootId, children) {
-        _this.conn.send({
-          type: MAQAW_DATA_TYPE.SCREEN,
-          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
-          f: 'initialize',
-          args: [rootId, children]
-        });
-      },
-
-      applyChanged: function(removed, addedOrMoved, attributes, text) {
-        _this.conn.send({
-          type: MAQAW_DATA_TYPE.SCREEN,
-          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
-          f: 'applyChanged',
-          args: [removed, addedOrMoved, attributes, text]
-        });
-      }
-    });
-
-    this.mouseMirror = new MouseMirror(document, {
-      mousemove: function(event) {
-        _this.conn.send({ 
-          type: MAQAW_DATA_TYPE.SCREEN,
-          request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
-          coords: {x: event.pageX, y: event.pageY}
-        });
-      }, 
-      click: function(event) {
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
-              coords: {x: event.pageX, y: event.pageY},
-              target: maqawGetNodeHierarchy(document, event.target)
-          });
-      }
-    });
-  
-    // Set up scroll listener
-    window.addEventListener('scroll', scrollListener, false);
-    function scrollListener(){
-      var top = window.pageYOffset;
-      var left = window.pageXOffset;
-      _this.conn.send({
-        type: MAQAW_DATA_TYPE.SCREEN,
-        request: MAQAW_MIRROR_ENUMS.SCROLL,
-        top: top,
-        left: left
-      });
-    }
-
-
-
-    /* Set up listeners to input events */
-      this.inputMirror = new MaqawInputMirror(document, {
-          multipleSelect: function(){
-              // get list of selected options
-              var selectedOptions = [];
-              for(var j = 0; j < this.selectedOptions.length; j++){
-                  selectedOptions.push(this.selectedOptions[j].text);
-              }
-              _this.conn.send({
-                  type: MAQAW_DATA_TYPE.SCREEN,
-                  request: MAQAW_MIRROR_ENUMS.INPUT,
-                  index: maqawGetNodeHierarchy(document, this),
-                  selectedOptions: selectedOptions
-              });
-          },
-          singleSelect: function(){
-              _this.conn.send({
-                  type: MAQAW_DATA_TYPE.SCREEN,
-                  request: MAQAW_MIRROR_ENUMS.INPUT,
-                  index: maqawGetNodeHierarchy(document, this),
-                  selectedIndex: this.selectedIndex
-              });
-          }
-          ,
-          inputDefault: function(){
-              _this.conn.send({
-                  type: MAQAW_DATA_TYPE.SCREEN,
-                  request: MAQAW_MIRROR_ENUMS.INPUT,
-                  index: maqawGetNodeHierarchy(document, this),
-                  text: this.value
-              });
-          }
-          ,
-          radioAndCheckbox: function(){
-              _this.conn.send({
-                  type: MAQAW_DATA_TYPE.SCREEN,
-                  request: MAQAW_MIRROR_ENUMS.INPUT,
-                  index: maqawGetNodeHierarchy(document, this),
-                  checked: this.checked
-              });
-          }
-      });
-
-      // listener for window resize
-      var oldResize = window.onresize;
-      function newResize (){
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.SIZE,
-              width: document.body.clientWidth
-          });
-
-          // call the old resize function as well if we overwrote one
-          if(oldResize){
-              oldResize();
-          }
-      }
-      window.onresize = newResize;
-
-  } else {
-    console.log("Error: Connection not established. Unable to stream screen");
-  }
-};
-
-Mirror.prototype.mirrorScreen = function(data) {
-  var _this = this;
-
-  function clearPage() {
-    // clear page //
-    while (_this.mirrorDocument.firstChild) {
-      _this.mirrorDocument.removeChild(_this.mirrorDocument.firstChild);
-    }
-  }
-
-  function handleMessage(msg) {
-    if (msg.clear){
-      clearPage();
-    }
-    else if (msg.base){
-      _this.base = msg.base;
-    }
-    else if (msg.request === MAQAW_MIRROR_ENUMS.SCREEN_DATA){
-      _this._mirror[msg.f].apply(_this._mirror, msg.args);
-    }
-    else if (msg.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE || msg.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK){
-        _this.mouseMirror.data(msg);
-    }
-    else if (msg.request === MAQAW_MIRROR_ENUMS.INPUT) {
-      _this.inputMirror.data(msg);
-    }
-  }
-
-  var msg = data;
-  if (msg instanceof Array) {
-    msg.forEach(function(subMessage) {
-      handleMessage(JSON.parse(subMessage));
-    });
-  } else {
-    handleMessage(msg);
-  }
-};
-
-function MouseMirror(doc, options) {
-  this.CURSOR_RADIUS = 10;
-  this.moveEvent = options.mousemove;
-  this.clickEvent = options.click;
-  this.doc = doc;
-  var _this = this;
-  this.isRep = Boolean(options.rep);
-
-    // keep track of the last element that was clicked on
-  this.lastElementClicked;
-
-  this.cursor = this.doc.createElement('div'); 
-  this.cursor.style.backgroundImage = "url('http://gohapuna.com/wp/wp-content/uploads/2013/08/cursor.png')";
-  this.cursor.style.height = '30px';
-  this.cursor.style.width = '20px';
-  this.cursor.style.zIndex = 10000;
-  this.cursor.style.position = 'absolute';
-  this.cursor.style.top = '0px';
-  this.cursor.style.left = '0px';
-  this.cursor.setAttribute("ignore", "true");
-
-    // maximum number of times per second mouse movement data will be sent
-    var MAX_SEND_RATE = 40;
-    // has enough time elapsed to send data again?
-    var isMouseTimeUp = true;
-    function moveMouse(event){
-      if(isMouseTimeUp){
-          _this.moveEvent(event);
-          isMouseTimeUp = false;
-          setTimeout(function(){isMouseTimeUp = true;}, 1000 / MAX_SEND_RATE);
-      }
-    }
-
-
-  this.doc.addEventListener('mousemove', moveMouse, false);
-  this.doc.addEventListener('click', this.clickEvent, false);
-
-
-  this.isDrawn = false;
-
-  return this;
-}
-
-MouseMirror.prototype.data = function(_data) {
-
-  if (!this.isDrawn) {
-    //  Hack that appends cursor only  
-    //  once a document.body exists
-    if (this.doc.body) {
-      this.doc.body.appendChild(this.cursor);
-      this.isDrawn = true;
-    }
-  }
-
-  if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE) {
-    this.moveMouse(_data);
-  } else if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK) {
-    this.clickMouse(_data);
-  }
-
-};
-
-MouseMirror.prototype.moveMouse = function(_data) {
-  this.cursor.style.top = _data.coords.y + 'px';
-  this.cursor.style.left = _data.coords.x + 'px';
-};
-
-MouseMirror.prototype.clickMouse = function(_data) {
-    var x = _data.coords.x;
-    var y = _data.coords.y;
-    var _this = this;
-
-    // get the clicked element
-    var target = maqawGetNodeFromHierarchy(this.doc, _data.target);
-    // remove highlight from last clicked element
-    if(this.lastElementClicked){
-        if(this.isRep){
-            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element-rep\b/,'');
-        }
-        else {
-            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element\b/,'');
-        }
-    }
-    // highlight the element that was clicked if it wasn't the body
-    if(target.tagName !== 'BODY'){
-        if(this.isRep){
-            target.className = target.className + ' maqaw-mirror-clicked-element-rep';
-        } else {
-            target.className = target.className + ' maqaw-mirror-clicked-element';
-        }
-        this.lastElementClicked = target;
-    }
-
-
-    function makeExpandingRing(){
-        var radius = 1;
-        var click = _this.doc.createElement('div');
-        click.style.width = 2*radius + 'px';
-        click.style.height = 2*radius + 'px';
-        click.style.backgroundColor = 'transparent';
-        click.style.border = '2px solid rgba(255, 255, 0, 1)';
-        click.style.borderRadius = '999px';
-        click.style.zIndex = 10000;
-        click.style.position = 'absolute';
-        click.style.top = y - radius + 'px';
-        click.style.left = x - radius + 'px';
-        click.setAttribute("ignore", "true");
-        _this.doc.body.appendChild(click);
-
-        var rate = 50;
-        var radiusIncrease = 2;
-        var transparency = 1;
-        var transparencyRate = .03;
-
-        (function expand() {
-            radius += radiusIncrease;
-            transparency -= transparencyRate;
-            click.style.border = '2px solid rgba(255, 255, 0, ' + transparency + ')';
-            click.style.width = 2*radius + 'px';
-            click.style.height = 2*radius + 'px';
-            click.style.top = y - radius + 'px';
-            click.style.left = x - radius + 'px';
-
-            if(transparency > 0){
-                setTimeout(expand, rate);
-            } else {
-                _this.doc.body.removeChild(click);
-            }
-        })();
-    }
-
-    var numRings = 6;
-    var ringSpacing = 300;
-    var ringCounter = 0;
-
-    function doRings (){
-        if(ringCounter < numRings){
-            makeExpandingRing();
-            ringCounter++;
-            setTimeout(doRings, ringSpacing);
-        }
-    }
-};
-
-MouseMirror.prototype.off = function() {
-  this.doc.removeEventListener('mousemove', this.moveEvent, false);
-  this.doc.removeEventListener('click', this.clickEvent, false);
-};
-
-
-/*
- * Attach listeners to input elements so that they can be mirrored.
- * doc - The document to search for input elements
- * conn - The connection to use to send mirror updates about the inputs
- */
-function MaqawInputMirror(doc, options){
-    this.doc = doc;
-    var _this = this;
-
-    this.radioAndCheckbox = options.radioAndCheckbox;
-    this.singleSelect = options.singleSelect;
-    this.multipleSelect = options.multipleSelect;
-    this.inputDefault = options.inputDefault;
-
-    function keyUpEvent(event){
-        var target = event.target;
-        if(target.tagName === 'INPUT'){
-            (_this.inputDefault.bind(target))();
-        }
-
-        else if(target.tagName === 'TEXTAREA'){
-            console.log("text area changed");
-            (_this.inputDefault.bind(target))();
-        }
-    }
-
-    function changeEvent(event){
-        var target = event.target;
-        if(target.tagName === 'INPUT'){
-            if(target.type === 'radio' || target.type === 'checkbox'){
-                (_this.radioAndCheckbox.bind(target))();
-            } else {
-                (_this.inputDefault.bind(target))();
-            }
-        }
-
-        else if(target.tagName === 'SELECT'){
-            if(target.type === 'select-one'){
-                (_this.singleSelect.bind(target))();
-            } else if(target.type === 'select-multiple'){
-                (_this.multipleSelect.bind(target))();
-            }
-        }
-    }
-
-    this.doc.addEventListener('keyup', keyUpEvent, false);
-    this.doc.addEventListener('change', changeEvent, false);
-}
-
-MaqawInputMirror.prototype.data = function(data){
-    // get the DOM node that was changed
-    var inputNode = maqawGetNodeFromHierarchy(this.doc, data.index);
-
-    // set the checked attribute if applicable
-    if(typeof data.checked !== 'undefined'){
-        inputNode.checked = data.checked;
-    }
-
-    // check for select options
-    else if (typeof data.selectedIndex !== 'undefined'){
-        inputNode.selectedIndex = data.selectedIndex;
-    }
-
-    // check for multiple select options
-    else if (typeof data.selectedOptions !== 'undefined'){
-        var i, option, length = inputNode.options.length, selectedOptions = data.selectedOptions,
-            optionsList = inputNode.options;
-        for (i = 0; i < length; i++ ) {
-            option = optionsList[i];
-            var index = selectedOptions.indexOf(option.text);
-            if(index !== -1){
-                option.selected = true;
-            } else {
-                option.selected = false;
-            }
-
-        }
-    }
-
-    // otherwise set text value
-    else {
-        inputNode.value = data.text;
-    }
-};
-
-MaqawInputMirror.prototype.off = function() {
-    this.doc.removeEventListener('keyup', this.inputDefault, false);
-    this.doc.removeEventListener('change', this.radioAndCheckbox, false);
-    this.doc.removeEventListener('change', this.singleSelect, false);
-    this.doc.removeEventListener('change', this.multipleSelect, false);
-};
 // Copyright 2011 Google Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -2673,7 +2674,19 @@ function MaqawConnection(peer, dstId, conn) {
     this.dataDirectives = [];
     this.errorDirectives = [];
     this.changeDirectives = [];
-    //          
+
+    // queue of messages to send reliably
+    this.reliableQueue = [];
+    // message that we are currently trying to send
+    this.reliableMessage = null;
+    // timeout to resend message when we don't hear back
+    this.reliableTimeout = null;
+    // the hash of the last reliable message we processed. Keep track of this so that we don't
+    // process the data more than once for a duplicate message
+    this.reliableLastMessageReceived = null;
+    // keep track of which messages we have acked and sent
+    this.ackNo = 0;
+    this.seqNo = 0;
 
     // whether or not this connection is open. True if open and false otherwise
     this.isConnected = false;
@@ -2702,7 +2715,47 @@ function MaqawConnection(peer, dstId, conn) {
      * and pass the rest of it on to the data callback
      */
     function handleData(data) {
-        // for now we are just sending text
+        // if this is a reliable message, handle the acknowledgement
+        if (data.isReliable) {
+            // check if this message is an ack and handle it if it is
+            var hash = data.hash;
+            // if there is no data, then the message is an ack
+            if (!data.data) {
+                // if this hash matches the message we sent, we can stop
+                // sending it and start sending the next one
+                if(that.reliableMessage && that.reliableMessage.hash === hash){
+                    // cancel timeout to resend this message
+                    if(that.reliableTimeout){
+                        clearTimeout(that.reliableTimeout);
+                        that.reliableTimeout = null;
+                    }
+                    that.reliableMessage = null;
+                    // send the next message in the queue
+                    that.sendReliable();
+                }
+                // no data to process so we just return
+                return;
+            }
+
+            else {
+                sendAck(hash);
+                // remove the reliable wrapper and process the data normally
+                // if this message isn't a duplicate
+                if(that.reliableLastMessageReceived !== hash){
+                    data = data.data;
+                    that.reliableLastMessageReceived = hash;
+                }
+
+            }
+        }
+
+        else {
+            // non reliable data is stringified before being sent
+            // this was done to fix the slowness of packing mirror data
+            data = JSON.parse(data);
+        }
+
+        // pass the data to any onData callbacks that are binded
         var i, dataLen = that.dataDirectives.length;
         for (i = 0; i < dataLen; i++) {
             that.dataDirectives[i](data);
@@ -2710,29 +2763,30 @@ function MaqawConnection(peer, dstId, conn) {
     }
 
     /*
+     * Send our peer an acknowledgement of the reliable messages that we have received.
+     * Our ackNo is the next seqNo that we are expecting from our peer
+     */
+    function sendAck(hash) {
+        that.conn.send({
+            isReliable: true,
+            hash: hash
+        });
+    }
+
+    /*
      * Update the status of the connection, and pass the status on to
      * the connectionListener
      */
     function setConnectionStatus(connectionStatus) {
-        var i,
-            changeLen = that.changeDirectives.length,
-            openLen = that.openDirectives.length,
-            closeLen = that.closeDirectives.length;
+        var i, len = that.changeDirectives.length;
 
-        for (i = 0; i < changeLen; i++) {
+        // alert all of the binded callbacks
+        for (i = 0; i < len; i++) {
             that.changeDirectives[i](connectionStatus);
         }
 
-        if (connectionStatus === false) {
-            for (i = 0; i < closeLen; i++) {
-                that.closeDirectives[i](connectionStatus);
-            }
-        } else if (connectionStatus === true) {
-            for (i = 0; i < openLen; i++) {
-                that.openDirectives[i](connectionStatus);
-            }
-        }
-        that.isConnected = Boolean(connectionStatus);
+        // save the status
+        that.isConnected = connectionStatus;
     }
 
     /*
@@ -2783,7 +2837,7 @@ function MaqawConnection(peer, dstId, conn) {
                 numAttempts++;
 
                 // close old connection
-                if(that.conn){
+                if (that.conn) {
                     that.conn.close();
                 }
 
@@ -2803,10 +2857,10 @@ function MaqawConnection(peer, dstId, conn) {
     /*
      * Handle a new peerjs connection request from our peer
      */
-    this.newConnectionRequest = function(conn){
+    this.newConnectionRequest = function (conn) {
         console.log("erasing old connection");
         // close the old connection
-        if(that.conn){
+        if (that.conn) {
             that.conn.close();
         }
 
@@ -2816,35 +2870,48 @@ function MaqawConnection(peer, dstId, conn) {
     };
 
     /*
-     * Send text through this connection
+     * Unreliable send function. No guarantee that the peer
+     * receives this data
      */
-    this.sendText = function (text) {
-        that.conn.send({
-            'type': MAQAW_DATA_TYPE.TEXT,
-            'text': text
-        });
+    this.send = function (data) {
+        that.conn.send(JSON.stringify(data));
     };
 
     /*
-     * Initializes a screen sharing session
+     * Reliably sends data to the peer. A queue of items to send is made, and each item is resent
+     * until an ack is received. When this is called the next item in the queue is sent. If a data
+     * argument is included it is added to the queue.
+     * data - Optional message to add to the sending queue
      */
-    this.startScreenShare = function (options) {
+    this.sendReliable = function (data) {
+        // add data to queue
+        if (data) {
+            that.reliableQueue.push(data);
+        }
 
+        // send the first message, if a message isn't already being sent
+        // and if the queue isn't empty
+        if (!that.reliableMessage && that.reliableQueue.length > 0) {
+            var msg = that.reliableQueue.shift();
+            that.reliableMessage = {
+                isReliable: true,
+                hash: maqawHash(Date.now() + JSON.stringify(msg)),
+                data: msg
+            };
+
+            (function send() {
+                // if the connection is closed, try to open it
+                if (!that.conn.open) {
+                    attemptConnection();
+                } else {
+                    that.conn.send(that.reliableMessage);
+                }
+                // try again soon
+                that.reliableTimeout = setTimeout(send, 1000);
+            })();
+        }
     };
 
-    /*
-     * Sends screen data
-     */
-    this.sendScreen = function (screenData) {
-
-    };
-
-    this.send = function(data) {
-      //  unopinionated, unreliable
-      //  send function. packets 
-      //  may arrive, packets may not
-      that.conn.send(data);  
-    };
 
     this.on = function (_event, directive) {
         // bind callback
@@ -2860,6 +2927,7 @@ function MaqawConnection(peer, dstId, conn) {
     function setConnectionCallbacks() {
         that.conn.on('open', function () {
             setConnectionStatus(true);
+            handleOpen();
         });
 
         that.conn.on('data', function (data) {
@@ -2870,6 +2938,7 @@ function MaqawConnection(peer, dstId, conn) {
 
         that.conn.on('close', function (err) {
             setConnectionStatus(false);
+            handleClose();
         });
 
         that.conn.on('error', function (err) {
@@ -2878,7 +2947,24 @@ function MaqawConnection(peer, dstId, conn) {
             for (i = 0; i < errorLen; i++) {
                 that.errorDirectives[i](err);
             }
+            // try to reopen connection
+            setConnectionStatus(false);
+            attemptConnection();
         });
+    }
+
+    function handleOpen() {
+        var i, len = that.openDirectives.length;
+        for (i = 0; i < len; i++) {
+            that.openDirectives[i]();
+        }
+    }
+
+    function handleClose() {
+        var i, len = that.closeDirectives.length;
+        for (i = 0; i < len; i++) {
+            that.closeDirectives[i]();
+        }
     }
 }
 /*
@@ -2990,7 +3076,7 @@ function MaqawLoginPage(manager) {
      // add text to header
     this.loginHeader = document.createElement('DIV');
     this.loginHeader.innerHTML = "Login";
-    this.loginHeader.className = 'maqaw-chat-header-text';
+    this.loginHeader.className = 'maqaw-header-text';
     this.header.appendChild(this.loginHeader);
 
 
@@ -5422,13 +5508,25 @@ function maqawGetNodeFromHierarchy(doc, hierarchy){
     return node;
 }
 
+function maqawHash(str){
+    var hash = 0;
+    if (str.length == 0) return hash;
+    for (i = 0; i < str.length; i++) {
+        char = str.charCodeAt(i);
+        hash = ((hash<<5)-hash)+char;
+        hash = hash & hash; // Convert to 32bit integer
+    }
+    return hash;
+}
+
 
 /*
  * Type codes for sending data with a MaqawConnection
  */
 var MAQAW_DATA_TYPE = {
     TEXT: 0,
-    SCREEN: 1
+    SCREEN: 1,
+    VISITOR_INFO: 2
 };/*
  Creates a chat window with a unique key to talk
  to a visitor.
@@ -5461,6 +5559,10 @@ function MaqawChatSession(chatSessionContainer, sendTextFunction, srcName, dstNa
     // add listener to text input. Capture text when enter is pressed
     this.textInput.addEventListener("keyup", keyPress, false);
 
+    this.setPeerName = function(name){
+        that.dstName = name;
+    };
+
     function keyPress(e) {
         // check if enter was pressed
         if (e.keyCode === 13) {
@@ -5478,7 +5580,7 @@ function MaqawChatSession(chatSessionContainer, sendTextFunction, srcName, dstNa
         // test if string is not just whitespace
         if (/\S/.test(text)) {
             //send data to our chat buddy
-            sendTextFunction(text);
+            that.sendTextFunction(text);
             // append new text to existing chat text
             that.textDisplay.innerHTML = that.textDisplay.innerHTML + "<p class='maqaw-chat-paragraph'>" +
                 "<span class='maqaw-chat-src-name'>" + that.srcName + ": </span>" + text + "</p>";
@@ -5574,51 +5676,176 @@ MaqawChatSession.prototype.getContainer = function () {
  VisitorSession manages a visitor's interaction with the Maqaw client. It contains the connection
  with a representative, and handles all display and transfer of communication with that rep.
  */
-function MaqawVisitorSession(manager) {
+var MAQAW_VISITOR_ENUMS = {
+    INFO: 0,
+    ACK: 1
+};
+function MaqawVisitorSession(manager, visitorInfo) {
     var that = this;
     this.chatSession;
     this.maqawManager = manager;
+
+    // Visitor info was passed in if it was previously stored. Otherwise it is undefined
+    this.visitorInfo = null;
+    if (visitorInfo) {
+        this.visitorInfo = new MaqawVisitorInfo(visitorInfo);
+    }
 
     // the status of our connection with a peer. True for open and false for closed
     // Defaults to false until we can verify that a connection has been opened
     this.isConnected = false;
 
-    // initialize header container for this session
+    /* initialize header container for this session */
     this.header = document.createElement('DIV');
     this.header.className = 'maqaw-default-client-header';
+    // div to hold text in header
+    this.headerText = document.createElement('DIV');
+    this.headerText.className = 'maqaw-header-text';
+    this.header.appendChild(this.headerText);
+    // function to change the header text
+    function changeHeaderText(text) {
+        that.headerText.innerHTML = text;
+    }
 
-    // initialize body container
+    // set default text
+    changeHeaderText("Chat with us!");
+
+    /* initialize body container */
     this.body = document.createElement('DIV');
+    this.body.className = 'maqaw-visitor-session-body';
+    // content div holds the main content in the body
+    this.bodyContent = document.createElement('DIV');
+    this.body.appendChild(this.bodyContent);
+    // function to set what content is shown
+    function setBodyContent(div) {
+        if(that.bodyContent.firstChild !== div){
+            that.bodyContent.innerHTML = '';
+            that.bodyContent.appendChild(div);
+        }
+    }
 
-    /* Create elements that make up chat window */
-    this.loginHeader = document.createElement('DIV');
-    this.loginHeader.innerHTML = "Chat with me!";
-    this.loginHeader.className = 'maqaw-chat-header-text';
-
-    // create div to hold chat info
-    this.visitorChatWindow = document.createElement('DIV');
-    this.visitorChatWindow.className = 'maqaw-client-chat-window';
-
-    // add chat session
+    /* Create chat container and session */
     var chatSessionContainer = document.createElement("DIV");
-    this.visitorChatWindow.appendChild(chatSessionContainer);
     this.chatSession = new MaqawChatSession(chatSessionContainer, sendTextFromChat, 'You', this.maqawManager.chatName);
 
-    // set up a connection listener to wait for a rep to make a connection with us
-    this.connection;
+    /* Create container for when no rep is available */
+    var noRepContainer = document.createElement("DIV");
+    noRepContainer.id = 'maqaw-no-rep-window';
+    noRepContainer.innerHTML = 'Sorry, there are no representatives available to chat';
+    // default to showing the noRepContainer until a connection with a rep is made
+    setBodyContent(noRepContainer);
 
+    /* Create a form to get the visitor's name and email address before chatting */
+    var visitorInfoContainer = document.createElement("DIV");
+    visitorInfoContainer.id = 'maqaw-visitor-session-info';
+    // Text instructions
+    var infoInstructions = document.createElement("DIV");
+    infoInstructions.id = 'maqaw-visitor-info-instructions';
+    infoInstructions.innerHTML = "Enter your name and email to start chatting with us!";
+    visitorInfoContainer.appendChild(infoInstructions);
+    // field for visitor name
+    var nameField = document.createElement("input");
+    nameField.setAttribute('type', "text");
+    nameField.setAttribute('id', "maqaw-visitor-name-field");
+    nameField.setAttribute('placeholder', 'Name');
+    visitorInfoContainer.appendChild(nameField);
+    // field for visitor email
+    var emailField = document.createElement("input");
+    emailField.setAttribute('type', "text");
+    emailField.setAttribute('id', "maqaw-visitor-email-field");
+    emailField.setAttribute('placeholder', 'Email');
+    visitorInfoContainer.appendChild(emailField);
+    // submit button
+    var infoSubmitButton = document.createElement('DIV');
+    infoSubmitButton.id = 'maqaw-visitor-info-button';
+    infoSubmitButton.innerHTML = 'Ok';
+    visitorInfoContainer.appendChild(infoSubmitButton);
+    // submit button callback
+    infoSubmitButton.addEventListener('click', visitorInfoEntered, false);
+    // callback function for when the visitor submits their info in the form
+    function visitorInfoEntered() {
+        var name = nameField.value;
+        var email = emailField.value;
+        // TODO: Display error message for invalid name or email
+        // check to make sure name and email aren't blank
+        if (name !== '' && email !== '') {
+            setVisitorInfo({
+                name: name,
+                email: email
+            });
+        }
+    }
+
+    // updates this visitor's personal information, shares the info with the connected rep,
+    // and allows the chat window to be shown now that we have the visitor's info
+    function setVisitorInfo(info) {
+        // store the visitor's info
+        that.visitorInfo = new MaqawVisitorInfo(info);
+        // send the info to the rep
+        sendVisitorInfo();
+        // call the connectionStatusCallback so that this visitor can be shown the chat window
+        // now that we have their info
+        connectionStatusCallback(that.isConnected);
+    }
+
+    // transmit the visitor's info to our peer
+    function sendVisitorInfo() {
+        // make sure we have info and a connection
+        if (that.visitorInfo && that.connection) {
+            // send the data to the rep
+            that.connection.sendReliable({
+                type: MAQAW_DATA_TYPE.VISITOR_INFO,
+                request: MAQAW_VISITOR_ENUMS.INFO,
+                info: JSON.stringify(that.visitorInfo)
+            });
+        }
+    }
+
+    /* Add footer to body */
+    this.bodyFooter = document.createElement('DIV');
+    this.bodyFooter.id = 'maqaw-visitor-session-footer';
+    this.body.appendChild(this.bodyFooter);
+
+    // add login button to footer
+    var loginButton = document.createElement('DIV');
+    loginButton.id = 'maqaw-login-button';
+    loginButton.innerHTML = "Login";
+    this.bodyFooter.appendChild(loginButton);
+
+    // setup callback for when login is clicked
+    loginButton.addEventListener('click', this.maqawManager.loginClicked, false);
+
+    // add Maqaw link to footer
+    var maqawLink = document.createElement('DIV');
+    maqawLink.id = 'maqaw-link';
+    maqawLink.innerHTML = 'POWERED BY <a href="http://maqaw.com">MAQAW</a>';
+    this.bodyFooter.appendChild(maqawLink);
+
+    /* Set up the connection */
+    this.connection = null;
     this.mirror = new Mirror();
 
-    this.maqawManager.connectionManager.on('connection', function(maqawConnection) {
-      if (that.connection) {
-        console.log("Warning: Overwriting existing connection");
-      }
-      that.connection = maqawConnection;
-      that.mirror.setConnection(that.connection);
+    this.maqawManager.connectionManager.on('connection', function (maqawConnection) {
+        if (that.connection) {
+            console.log("Warning: Overwriting existing connection");
+        }
+        that.connection = maqawConnection;
+        that.mirror.setConnection(that.connection);
 
-      maqawConnection.on('data', connectionDataCallback)
-        .on('change', connectionStatusCallback) 
-    }); 
+        maqawConnection.on('data', connectionDataCallback)
+            .on('change', connectionStatusCallback)
+            .on('open', connectionOpenCallback);
+    });
+
+    /*
+     * Called whenever a new connection with our peer is established. This can happen multiple times,
+     * like when the rep changes pages and a new connection has to be made.
+     */
+    function connectionOpenCallback() {
+        // make sure the rep has this visitor's info
+        connectionStatusCallback(true);
+        sendVisitorInfo();
+    }
 
     /*
      * For a connection received from the newConnectionListener, this function will be called by the connection
@@ -5630,7 +5857,7 @@ function MaqawVisitorSession(manager) {
             that.chatSession.newTextReceived(data.text);
         }
         if (data.type === MAQAW_DATA_TYPE.SCREEN) {
-          that.mirror && that.mirror.data(data);
+            that.mirror && that.mirror.data(data);
         }
     }
 
@@ -5640,7 +5867,6 @@ function MaqawVisitorSession(manager) {
      * with true representing an open connection and false representing closed.
      */
     function connectionStatusCallback(connectionStatus) {
-        //console.log("Visitor Session connection status: "+connectionStatus);
         that.isConnected = connectionStatus;
 
         // update chat session to reflect connection status
@@ -5648,10 +5874,18 @@ function MaqawVisitorSession(manager) {
 
         // show a different page if there is no connection with a rep
         if (connectionStatus) {
-            setClientChat();
+            // if they've enter their info, show them the chat window
+            if (that.visitorInfo) {
+                setBodyContent(chatSessionContainer);
+                that.chatSession.scrollToBottom();
+            }
+            // otherwise ask for their information
+            else {
+                setBodyContent(visitorInfoContainer);
+            }
         }
         else {
-            setNoRepPage();
+            setBodyContent(noRepContainer);
         }
     }
 
@@ -5660,104 +5894,36 @@ function MaqawVisitorSession(manager) {
      * to send to the peer.
      */
     function sendTextFromChat(text) {
-        if (!that.connection || !that.connection.isConnected) {
+        if (!that.connection || !that.isConnected) {
             console.log("Error: Cannot send text. Bad connection");
         } else {
-            that.connection.sendText(text);
+            that.connection.sendReliable({
+                type: MAQAW_DATA_TYPE.TEXT,
+                text: text
+            });
         }
-    }
-
-
-    // add footer
-    var chatFooter;
-    chatFooter = document.createElement('DIV');
-    chatFooter.id = 'maqaw-chat-footer';
-    this.visitorChatWindow.appendChild(chatFooter);
-
-    // add login button to footer
-    var loginButton;
-    loginButton = document.createElement('DIV');
-    loginButton.id = 'maqaw-login-button';
-    loginButton.innerHTML = "Login"
-    chatFooter.appendChild(loginButton);
-
-    // setup callback for when login is clicked
-    loginButton.addEventListener('click', this.maqawManager.loginClicked, false);
-
-    // add Maqaw link to footer
-    var maqawLink;
-    maqawLink = document.createElement('DIV');
-    maqawLink.id = 'maqaw-link';
-    maqawLink.innerHTML = 'POWERED BY <a href="http://maqaw.com">MAQAW</a>';
-    chatFooter.appendChild(maqawLink);
-
-    /* Create container for when no rep is available */
-    this.noRepWindow = document.createElement("DIV");
-    this.noRepWindow.id = 'maqaw-no-rep-window';
-    this.noRepWindow.className = 'maqaw-client-chat-window'
-    this.noRepWindow.innerHTML = '';
-
-    var noRepText = document.createElement("DIV");
-    noRepText.className = 'maqaw-chat-display';
-    noRepText.innerHTML = 'Sorry, there are no representatives available to chat';
-    this.noRepWindow.appendChild(noRepText);
-
-    this.noRepHeader = document.createElement('DIV');
-    this.noRepHeader.innerHTML = "Send us an email!";
-    this.noRepHeader.className = 'maqaw-chat-header-text';
-
-    // add footer
-    var noRepFooter;
-    noRepFooter = document.createElement('DIV');
-    noRepFooter.id = 'maqaw-chat-footer';
-    this.noRepWindow.appendChild(noRepFooter);
-
-    // add login button to footer
-    var noRepLoginButton;
-    noRepLoginButton = document.createElement('DIV');
-    noRepLoginButton.id = 'maqaw-login-button';
-    noRepLoginButton.innerHTML = "Login"
-    noRepFooter.appendChild(noRepLoginButton);
-
-    // setup callback for when login is clicked
-    noRepLoginButton.addEventListener('click', this.maqawManager.loginClicked, false);
-
-    // add Maqaw link to footer
-    var maqawLink;
-    maqawLink = document.createElement('DIV');
-    maqawLink.id = 'maqaw-link';
-    maqawLink.innerHTML = 'POWERED BY <a href="http://maqaw.com">MAQAW</a>';
-    noRepFooter.appendChild(maqawLink);
-
-    // set the chat window to default to no rep
-    setNoRepPage();
-
-    function setClientChat() {
-        that.body.innerHTML = '';
-        that.body.appendChild(that.visitorChatWindow);
-        that.header.innerHTML = '';
-        that.header.appendChild(that.loginHeader);
-    }
-
-    function setNoRepPage() {
-        that.body.innerHTML = '';
-        that.body.appendChild(that.noRepWindow);
-        that.header.innerHTML = '';
-        that.header.appendChild(that.noRepHeader);
     }
 
     // returns an object containing the data that constitutes this visitors session
     this.getSessionData = function () {
         return {
-            chatText: that.chatSession.getText()
+            chatText: that.chatSession.getText(),
+            info: JSON.stringify(that.visitorInfo)
         };
     };
 
     // takes an visitor session data object (from getSessionData) and loads this visitor
     // session with it
     this.loadSessionData = function (sessionData) {
-        that.chatSession.setText(sessionData.chatText);
-    }
+        if (sessionData.chatText) {
+            that.chatSession.setText(sessionData.chatText);
+        }
+
+        var info = JSON.parse(sessionData.info);
+        if (info) {
+            setVisitorInfo(info);
+        }
+    };
 }
 
 MaqawVisitorSession.prototype.getBodyContents = function () {
@@ -5767,6 +5933,188 @@ MaqawVisitorSession.prototype.getBodyContents = function () {
 MaqawVisitorSession.prototype.getHeaderContents = function () {
     return this.header;
 };
+
+
+/*
+ MaqawManager is the top level class for managing the Maqaw client
+ */
+function MaqawManager(options, display) {
+    var that = this,
+        host = '54.214.232.157',
+        port = 3000;
+
+    // the key that peers will use to connect to each other on the peer server
+    this.key = options.key;
+    this.chatName = options.name;
+
+    // list of all visitors connected to the server
+    this.visitors = [];
+
+    // this id is used whenever the client makes a connection with peerjs
+    this.id = maqawCookies.getItem('peerId');
+    // an array of ids of representatives that are available for chat
+    this.maqawDisplay = display;
+    this.visitorSession;
+    this.repSession;
+
+    // a MaqawLoginPage object that can be used to login with rep details
+    this.loginPage;
+
+    if (this.id) {
+        //  peer id has been stored in the browser. Use it
+        this.peer = new Peer(this.id, {key: this.key, host: host, port: port});
+    } else {
+        //  No peer id cookie found. Retrieve new id from browser
+        this.peer = new Peer({key: this.key, host: host, port: port});
+    }
+
+    // initialize the connection manager
+    this.connectionManager = new MaqawConnectionManager(this.peer);
+
+    /* listen for peer js events */
+    this.peer.on('open', function (id) {
+        console.log("My id: " + id);
+        that.id = id
+        maqawCookies.setItem('peerId', id, Infinity);
+    });
+
+    this.peer.on('clients', function (visitors) {
+        console.log('visitors: ' + visitors.msg);
+        that.visitors = visitors.msg;
+        that.handleVisitorList(that.visitors);
+    });
+
+    this.peer.on('representatives', function (reps) {
+        console.log('Reps: ' + reps.msg);
+        that.representatives = reps.msg;
+    });
+
+    /*
+     * Receives an array of visitors from the Peer Server and passes
+     * the information along to VisitorList and ConnectionManager
+     */
+    this.handleVisitorList = function (visitors) {
+        that.repSession && that.repSession.visitorList.setVisitorList(visitors);
+        that.connectionManager.setVisitors(visitors);
+    };
+
+    this.screenShareClicked = function(event) {
+      event.preventDefault();  
+      event.stopPropagation();
+      
+    };
+
+    // function called the VisitorSession when the login button is clicked
+    this.loginClicked = function () {
+        // create and display a new LoginPage object if one doesn't already exist
+        if (!that.loginPage) {
+            that.loginPage = new MaqawLoginPage(that);
+        }
+        that.maqawDisplay.setHeaderContents(that.loginPage.getHeaderContents());
+        that.maqawDisplay.setBodyContents(that.loginPage.getBodyContents());
+    };
+
+
+    this.logoutClicked = function () {
+        // clear cookies and local data for the rep
+        maqawCookies.removeItem('maqawRepLoginCookie');
+        localStorage.removeItem('maqawRepSession');
+        that.showVisitorSession();
+    };
+
+    // displays the saved visitor session
+    this.showVisitorSession = function () {
+        that.maqawDisplay.setHeaderContents(that.visitorSession.getHeaderContents());
+        that.maqawDisplay.setBodyContents(that.visitorSession.getBodyContents());
+    };
+
+    // tries to load a previously saved visitor session. If no session can be found
+    // a new one is created
+    this.startVisitorSession = function () {
+        // create new visitor session
+        var visitorSession = new MaqawVisitorSession(that);
+        // try to pull previously saved session data
+        var storedSessionData = JSON.parse(localStorage.getItem('maqawVisitorSession'));
+        // if previous data was found load it into the visitorSession
+        if (storedSessionData) {
+            visitorSession.loadSessionData(storedSessionData);
+        }
+        // save the session
+        that.visitorSession = visitorSession;
+    };
+
+    // Creates and displays a new MaqawRepSession using the MaqawRepresentative object that
+    // is passed in.
+    this.startNewRepSession = function (rep) {
+        that.repSession = new MaqawRepSession(that, rep);
+
+        // if we are loading a saved session, retrieve stored data
+        if (that.loadPreviousRepSession) {
+            // attempt to reload previous rep session data
+            var storedSessionData = JSON.parse(localStorage.getItem('maqawRepSession'));
+            // if previous data was found load it into the repSession
+            if (storedSessionData) {
+                that.repSession.loadSessionData(storedSessionData);
+            }
+        }
+
+        // update the session with the current list of visitors
+        that.repSession.updateVisitorList(that.visitors);
+
+        // display the rep session
+        that.maqawDisplay.setHeaderContents(that.repSession.getHeaderContents());
+        that.maqawDisplay.setBodyContents(that.repSession.getBodyContents());
+    };
+
+    // checks for a login cookie for a rep. If one is found we attempt to reload the session
+    // return true if a rep session is successfully loaded and false otherwise
+    this.loadRepSession = function () {
+        // check for a login cookie, return false if one can't be found
+        var loginCookie = maqawCookies.getItem('maqawRepLoginCookie');
+        if (loginCookie === null) {
+            return false;
+        }
+
+        // otherwise reload the rep session
+        if (!that.loginPage) {
+            that.loginPage = new MaqawLoginPage(that);
+        }
+        that.loginPage.loginWithParams(loginCookie);
+        that.loadPreviousRepSession = true;
+        return true;
+    };
+
+    // setup an event listener for when the page is changed so that we can save the
+    // visitor session
+    function saveVisitorSession() {
+        if (typeof that.visitorSession !== 'undefined') {
+            var sessionData = that.visitorSession.getSessionData();
+            var jsonSession = JSON.stringify(sessionData);
+            localStorage.setItem('maqawVisitorSession', jsonSession);
+        }
+    }
+
+    // save the logs and details of the rep session (if there is one)
+    // in local storage so it can be reloaded on page change
+    function saveRepSession() {
+        if (typeof that.repSession !== 'undefined') {
+            var sessionData = that.repSession.getSessionData();
+            var jsonSession = JSON.stringify(sessionData);
+            console.log(jsonSession);
+            localStorage.setItem('maqawRepSession', jsonSession);
+
+        }
+    }
+
+    function saveSession() {
+        saveVisitorSession();
+        saveRepSession();
+
+    }
+
+    // Add listener to save session state on exit so it can be reloaded later.
+    window.addEventListener('unload', saveSession, false);
+}
 /*
  MaqawManager is the top level class for managing the Maqaw client
  */
@@ -6057,7 +6405,7 @@ function MaqawRepSession(manager, rep) {
     // add text to header
     var header = document.createElement("DIV");
     header.innerHTML = 'Welcome!';
-    header.className = 'maqaw-chat-header-text';
+    header.className = 'maqaw-header-text';
     this.header.appendChild(header);
     
     // create window for logged in users
@@ -6148,33 +6496,69 @@ MaqawRepSession.prototype.getHeaderContents = function() {
  * has a row in the visitor display table where we can click on them to select or deselect them for chat. The
  * visitor object maintains all connection data that the rep needs to communicate with the visitor on the site.
  * id - the peerjs id of this visitor
- * name - the name we are using for this visitor
- * repSession - the MaqawRepSession object
+ * info -An object containing information about this visitor, like name and email address.
+ *      This is optional, but can be provided if we have previously saved it for later
+ * visitorList - The MaqawVisitorList object storing this visitor
  */
-function MaqawVisitor(id, name, visitorList) {
+function MaqawVisitor(id, visitorList, info) {
     var that = this;
     this.visitorList = visitorList;
     this.connectionManager = visitorList.maqawManager.connectionManager;
     this.id = id;
-    this.name = name;
+    this.info = null;
+    if (info) {
+        this.info = new MaqawVisitorInfo(info);
+    }
 
     /* Set up visitor display row in table */
     // create row to display this visitor in the table
-    this.row = this.visitorList.table.insertRow(-1);
-    this.row.className = 'maqaw-visitor-list-entry';
-    // the row contains a single cell containing the visitor name
+    // -1 inserts the row at the end of the table
+    var row = this.visitorList.table.insertRow(-1);
+    row.className = 'maqaw-visitor-list-entry';
+    // the cell containing the visitor info
     var cell = document.createElement("td");
-    var cellText = document.createTextNode(this.name);
-    cell.appendChild(cellText);
-    this.row.appendChild(cell);
+    row.appendChild(cell);
+    // function to update the visitor info in the row when we get personalized data
+    // from the visitor
+    function updateRowInfo() {
+        cell.innerHTML = '';
+        var text = "visitor";
+        // use personal information if we have it
+        if (that.info) {
+            text = that.info.name + " (" + that.info.email+")";
+        }
+        var textNode = document.createTextNode(text);
+        cell.appendChild(textNode);
+    }
+    // update the row data now for the case that visitor info was loaded from storage
+    updateRowInfo();
+
+    // This function is passed any data that is received from the visitor peer
+    // about their personal information
+    function handleVisitorInfo(data) {
+        // create a new VisitorInfo object with this data
+        that.info = JSON.parse(data.info);
+        // update the chat session name
+        that.chatSession.setPeerName(that.info.name);
+        //update the display in the visitor table
+        updateRowInfo();
+        // call the connectionStatusCallback so that this visitor can be
+        //shown in the list now that we have their info
+        connectionStatusCallback(that.isConnected);
+        // send an acknowledgement back
+        that.connection.send({
+            type: MAQAW_DATA_TYPE.VISITOR_INFO,
+            request: MAQAW_VISITOR_ENUMS.ACK
+        });
+    }
 
     // append row to the visitor table
-    this.visitorList.tBody.appendChild(this.row);
+    this.visitorList.tBody.appendChild(row);
 
     this.isSelected = false;
 
     // append click listener to row
-    this.row.addEventListener('click', clickCallBack, false);
+    row.addEventListener('click', clickCallBack, false);
     function clickCallBack() {
         that.visitorList.setSelectedVisitor(that);
     }
@@ -6189,7 +6573,7 @@ function MaqawVisitor(id, name, visitorList) {
     this.isConnected = false;
 
     // each visitor has a unique chat session
-    this.chatSession = new MaqawChatSession(document.createElement("DIV"), sendTextFromChat, 'You', this.name);
+    this.chatSession = new MaqawChatSession(document.createElement("DIV"), sendTextFromChat, 'You', "Visitor");
 
     // create a new connection
     this.connection = this.connectionManager.newConnection(this.id);
@@ -6209,7 +6593,10 @@ function MaqawVisitor(id, name, visitorList) {
         if (!that.connection || !that.connection.isConnected) {
             console.log("Visitor Error: Cannot send text. Bad connection");
         } else {
-            that.connection.sendText(text);
+            that.connection.sendReliable({
+                type: MAQAW_DATA_TYPE.TEXT,
+                text: text
+            });
         }
     }
 
@@ -6224,7 +6611,11 @@ function MaqawVisitor(id, name, visitorList) {
             alertNewText();
         }
         if (data.type === MAQAW_DATA_TYPE.SCREEN) {
-          that.mirror && that.mirror.data(data);
+            that.mirror && that.mirror.data(data);
+        }
+        // information about the visitor
+        if (data.type === MAQAW_DATA_TYPE.VISITOR_INFO) {
+            handleVisitorInfo(data);
         }
     }
 
@@ -6238,9 +6629,9 @@ function MaqawVisitor(id, name, visitorList) {
         (function flashRow() {
             if (!that.isSelected) {
                 if (on) {
-                    that.row.className = 'maqaw-alert-visitor';
+                    row.className = 'maqaw-alert-visitor';
                 } else {
-                    that.row.className = 'maqaw-visitor-list-entry';
+                    row.className = 'maqaw-visitor-list-entry';
                 }
                 on = !on;
                 setTimeout(flashRow, flashSpeed);
@@ -6278,12 +6669,15 @@ function MaqawVisitor(id, name, visitorList) {
                 clearTimeout(timeoutId);
                 timeoutId = null;
             }
-            show();
+            // only show this visitor if we have gotten their info
+            if (that.info) {
+                show();
+            }
         }
 
         // if we were previously disconnected but are now connected then restart the mirror
         // if applicable
-        if(!that.isConnected && connectionStatus){
+        if (!that.isConnected && connectionStatus) {
             that.mirror && that.mirror.connectionReset();
         }
 
@@ -6299,7 +6693,7 @@ function MaqawVisitor(id, name, visitorList) {
     this.select = function () {
         that.isSelected = true;
         // change class to selected
-        that.row.className = 'maqaw-selected-visitor';
+        row.className = 'maqaw-selected-visitor';
         // show visitor chat window
         that.visitorList.chatManager.showVisitorChat(that)
     };
@@ -6311,24 +6705,24 @@ function MaqawVisitor(id, name, visitorList) {
     this.deselect = function () {
         that.isSelected = false;
         // change class to default
-        that.row.className = 'maqaw-visitor-list-entry';
+        row.className = 'maqaw-visitor-list-entry';
         // clear chat window
         that.visitorList.chatManager.clear(that);
     };
 
-    this.requestScreen = function() {
-      // Initialize new mirror if it exists. 
-      // pass mirror the connection.
-      // ----------------------------------
-      // 
-      if (this.mirror) {
-        // Start sharing dat screen //
-        this.mirror.requestScreen();
-      } else {
-        // unable to share
-       console.log("mirror unable to initialize"); 
-      }
-    }
+    this.requestScreen = function () {
+        // Initialize new mirror if it exists.
+        // pass mirror the connection.
+        // ----------------------------------
+        //
+        if (this.mirror) {
+            // Start sharing dat screen //
+            this.mirror.requestScreen();
+        } else {
+            // unable to share
+            console.log("mirror unable to initialize");
+        }
+    };
 
     /*
      * Hide this visitor from being in the visitor table. Deselect it if applicable
@@ -6336,8 +6730,8 @@ function MaqawVisitor(id, name, visitorList) {
     function hide() {
         that.isSelected = false;
         // change class to default
-        that.row.className = 'maqaw-visitor-list-entry';
-        that.row.style.display = 'none';
+        row.className = 'maqaw-visitor-list-entry';
+        row.style.display = 'none';
         // tell the VisitorList that we are going to hide this visitor so that it can deselect
         // it if necessary
         that.visitorList.hideVisitor(that);
@@ -6349,8 +6743,16 @@ function MaqawVisitor(id, name, visitorList) {
      * Show this visitor in the visitor table
      */
     function show() {
-        that.row.style.display = 'block';
+        row.style.display = 'block';
     }
+}
+
+/*
+ * Store information about this visitor
+ */
+function MaqawVisitorInfo(info) {
+    this.name = info.name;
+    this.email = info.email;
 }
 /*
  VisitorList manages all current visitors and displays the list in a table
@@ -6406,10 +6808,13 @@ function MaqawVisitorList(listDisplayContainer, repSession) {
     // create a new visitor using the specified id, and wrap the visitor in a MaqawVisitorWrapper object
     // to help manage selecting and displaying the visitor
     function createNewVisitor(id) {
-        var visitorName = 'Visitor ' + that.visitorCounter;
+        var info = {
+            name: 'Visitor ' + that.visitorCounter,
+            email: 'no email'
+        };
         that.visitorCounter++;
         // use rowIndex of -1 so the row is added at the end of the table
-        return new MaqawVisitor(id, visitorName, that);
+        return new MaqawVisitor(id, that, null);
     }
 
     this.setSelectedVisitor = function (visitor) {
@@ -6450,7 +6855,7 @@ function MaqawVisitorList(listDisplayContainer, repSession) {
             var visitor = that.visitors[visitorId];
             // save the data that is important to state
             var visitorData = {
-                name: visitor.name,
+                info: visitor.info,
                 id: visitor.id,
                 isSelected: visitor.isSelected,
                 chatText: visitor.chatSession.getText()
@@ -6472,11 +6877,11 @@ function MaqawVisitorList(listDisplayContainer, repSession) {
 
         // go through each entry in the list data and restore it
         for(var index in listData){
-            var dataObject = listData[index];
+            var visitorData = listData[index];
             // create and update a visitor using this data
-            var visitor = new MaqawVisitor(dataObject['id'], dataObject['name'], that);
+            var visitor = new MaqawVisitor(visitorData.id, that, visitorData.info);
 
-            if(dataObject['isSelected']) {
+            if(visitorData.isSelected) {
                 that.selectedVisitor = visitor;
                 visitor.select();
             }
@@ -6485,7 +6890,7 @@ function MaqawVisitorList(listDisplayContainer, repSession) {
             that.visitorCounter++;
 
             // load the chat history
-            visitor.chatSession.setText(dataObject['chatText']);
+            visitor.chatSession.setText(visitorData['chatText']);
 
             // save this visitor in the list
             that.visitors[visitor.id] = visitor;
