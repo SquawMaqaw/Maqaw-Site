@@ -1,950 +1,3 @@
-var MAQAW_MIRROR_ENUMS = {
-  SHARE_SCREEN: 0, 
-  SHARE_SCREEN_OK: 1,
-  SHARE_SCREEN_REFUSE: 2,
-  SCREEN_DATA: 3,
-  MOUSE_MOVE: 4,
-  MOUSE_CLICK: 5,
-  SCROLL: 6,
-  INPUT: 7,
-  SIZE_REQUEST: 8,
-  SIZE: 9
-};
-
-function Mirror(options) {
-  // stores connection object if exists
-  this.conn = options && options.conn;
-  this.base;
-
-  this.mirrorDocument;
-  this.mirrorWindow;
-  this.mouseMirror;
-  this.inputMirror;
-
-  // whether or not we are currently viewing our peer's screen
-  this.isViewingScreen = false;
-
-}
-
-/*
- * Called when the connection to our peer is reset
- */
-Mirror.prototype.connectionReset = function () {
-   // if we were watching our peer's screen, tell that to start sending screen
-   //data again
-    if(this.mirrorWindow && !this.mirrorWindow.closed){
-        this.requestScreen();
-    }
-};
-
-Mirror.prototype.data = function(_data) {
-  //
-  // handle new data. For a new share screen
-  // request, function opens a new mirror
-  // for all other requests, function passes
-  // data to mirrorScreen
-  //
-  switch(_data.request) {
-    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN:
-      // Request from peer to view this screen  
-      this.conn.send({ type: MAQAW_DATA_TYPE.SCREEN, request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK });
-      this.shareScreen();
-      break;
-    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK:
-      //  Share screen request received and 
-      //  validated open a screen mirror 
-      this.openMirror();
-      break;
-    case MAQAW_MIRROR_ENUMS.SCREEN_DATA:
-      //  Screen Data.
-    case MAQAW_MIRROR_ENUMS.MOUSE_CLICK:
-      // Mouse click event
-    case MAQAW_MIRROR_ENUMS.MOUSE_MOVE:
-      // Mouse move event
-    case MAQAW_MIRROR_ENUMS.INPUT:
-      // Interactions with input elements
-      this.mirrorScreen(_data);  
-      break;
-    case MAQAW_MIRROR_ENUMS.SCROLL:
-      this.mirrorWindow.scrollTo(_data.left, _data.top);
-      break;
-    case MAQAW_MIRROR_ENUMS.SIZE:
-      this.mirrorDocument.body.style.width = _data.width;
-      break;
-    case MAQAW_MIRROR_ENUMS.SIZE_REQUEST:
-      this.conn.send({
-        type: MAQAW_DATA_TYPE.SCREEN,
-        request: MAQAW_MIRROR_ENUMS.SIZE,
-        width: document.body.clientWidth
-      });
-      break;
-    default:
-      // Unknown
-      break;
-  }
-};
-
-Mirror.prototype.openMirror = function() {
-  var _this = this;
-
-  // if we are already viewing the screen, don't open a new window
-    if(!this.isViewingScreen) {
-         this.mirrorWindow = window.open();
-         this.mirrorDocument = this.mirrorWindow.document;
-
-        // attach a listener for if the window is closed
-        this.mirrorWindow.addEventListener('unload', function() {
-            // TODO: implement me
-            _this.isViewingScreen = false;
-        }, false);
-
-        // request dimensions for body
-        _this.conn.send({
-            type: MAQAW_DATA_TYPE.SCREEN,
-            request: MAQAW_MIRROR_ENUMS.SIZE_REQUEST
-        });
-
-    }
-
-    this.isViewingScreen = true;
-
-  this._mirror = new TreeMirror(this.mirrorDocument, {
-    createElement: function(tagName) {
-      if (tagName == 'SCRIPT') {
-        var node = _this.mirrorDocument.createElement('NO-SCRIPT');
-        node.style.display = 'none';
-        return node;
-      }
-
-      if (tagName == 'HEAD') {
-        var node = _this.mirrorDocument.createElement('HEAD');
-        node.appendChild(_this.mirrorDocument.createElement('BASE'));
-        node.firstChild.href = _this.base;
-        return node;
-      }
-    }
-  });
-  
-  this.mouseMirror = new MouseMirror(this.mirrorDocument, {
-    mousemove: function(event) {
-      _this.conn.send({
-        type: MAQAW_DATA_TYPE.SCREEN,
-        request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
-        coords: {x: event.pageX, y: event.pageY}
-      });
-    }, 
-    click: function(event) {
-        _this.conn.send({
-            type: MAQAW_DATA_TYPE.SCREEN,
-            request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
-            coords: {x: event.pageX, y: event.pageY},
-            target: maqawGetNodeHierarchy(_this.mirrorDocument, event.target)
-        });
-    },
-    rep: true
-  });
-
-  this.inputMirror = new MaqawInputMirror(this.mirrorDocument, {
-      multipleSelect: function(){
-          // get list of selected options
-          var selectedOptions = [];
-          for(var j = 0; j < this.selectedOptions.length; j++){
-              selectedOptions.push(this.selectedOptions[j].text);
-          }
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.INPUT,
-              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
-              selectedOptions: selectedOptions
-          });
-      },
-      singleSelect: function(){
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.INPUT,
-              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
-              selectedIndex: this.selectedIndex
-          });
-      }
-          ,
-      inputDefault: function(){
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.INPUT,
-              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
-              text: this.value
-          });
-      }
-          ,
-      radioAndCheckbox: function(){
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.INPUT,
-              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
-              checked: this.checked
-          });
-      }
-  });
-};
-
-Mirror.prototype.setConnection = function(conn) {
-  // set a connection if established later
-  this.conn = conn;
-};
-
-Mirror.prototype.requestScreen = function() {
-  //
-  //  Sends share screen request to peer
-  //
-  if (this.conn) {
-    this.conn.send({ 
-      type: MAQAW_DATA_TYPE.SCREEN,
-      request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN
-    });
-  }
-};
-
-Mirror.prototype.shareScreen = function() {
-  //
-  // streams screen to peer
-  //
-  var _this = this;
-  if (this.conn) {
-
-    this.conn.send({
-      type: MAQAW_DATA_TYPE.SCREEN,
-      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
-      clear: true 
-    });
-
-    this.conn.send({
-      type: MAQAW_DATA_TYPE.SCREEN,
-      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
-      base: location.href.match(/^(.*\/)[^\/]*$/)[1] 
-    });
-
-    var mirrorClient = new TreeMirrorClient(document, {
-
-      initialize: function(rootId, children) {
-        _this.conn.send({
-          type: MAQAW_DATA_TYPE.SCREEN,
-          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
-          f: 'initialize',
-          args: [rootId, children]
-        });
-      },
-
-      applyChanged: function(removed, addedOrMoved, attributes, text) {
-        _this.conn.send({
-          type: MAQAW_DATA_TYPE.SCREEN,
-          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
-          f: 'applyChanged',
-          args: [removed, addedOrMoved, attributes, text]
-        });
-      }
-    });
-
-    // remove old mouse mirror if applicable so there isn't a duplicate cursor
-    // from two screen sharing sessions
-
-    this.mouseMirror = new MouseMirror(document, {
-      mousemove: function(event) {
-        _this.conn.send({ 
-          type: MAQAW_DATA_TYPE.SCREEN,
-          request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
-          coords: {x: event.pageX, y: event.pageY}
-        });
-      }, 
-      click: function(event) {
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
-              coords: {x: event.pageX, y: event.pageY},
-              target: maqawGetNodeHierarchy(document, event.target)
-          });
-      }
-    });
-  
-    // Set up scroll listener
-    window.addEventListener('scroll', scrollListener, false);
-    function scrollListener(){
-      var top = window.pageYOffset;
-      var left = window.pageXOffset;
-      _this.conn.send({
-        type: MAQAW_DATA_TYPE.SCREEN,
-        request: MAQAW_MIRROR_ENUMS.SCROLL,
-        top: top,
-        left: left
-      });
-    }
-
-
-
-    /* Set up listeners to input events */
-      this.inputMirror = new MaqawInputMirror(document, {
-          multipleSelect: function(){
-              // get list of selected options
-              var selectedOptions = [];
-              for(var j = 0; j < this.selectedOptions.length; j++){
-                  selectedOptions.push(this.selectedOptions[j].text);
-              }
-              _this.conn.send({
-                  type: MAQAW_DATA_TYPE.SCREEN,
-                  request: MAQAW_MIRROR_ENUMS.INPUT,
-                  index: maqawGetNodeHierarchy(document, this),
-                  selectedOptions: selectedOptions
-              });
-          },
-          singleSelect: function(){
-              _this.conn.send({
-                  type: MAQAW_DATA_TYPE.SCREEN,
-                  request: MAQAW_MIRROR_ENUMS.INPUT,
-                  index: maqawGetNodeHierarchy(document, this),
-                  selectedIndex: this.selectedIndex
-              });
-          }
-          ,
-          inputDefault: function(){
-              _this.conn.send({
-                  type: MAQAW_DATA_TYPE.SCREEN,
-                  request: MAQAW_MIRROR_ENUMS.INPUT,
-                  index: maqawGetNodeHierarchy(document, this),
-                  text: this.value
-              });
-          }
-          ,
-          radioAndCheckbox: function(){
-              _this.conn.send({
-                  type: MAQAW_DATA_TYPE.SCREEN,
-                  request: MAQAW_MIRROR_ENUMS.INPUT,
-                  index: maqawGetNodeHierarchy(document, this),
-                  checked: this.checked
-              });
-          }
-      });
-
-      // listener for window resize
-      var oldResize = window.onresize;
-      function newResize (){
-          _this.conn.send({
-              type: MAQAW_DATA_TYPE.SCREEN,
-              request: MAQAW_MIRROR_ENUMS.SIZE,
-              width: document.body.clientWidth
-          });
-
-          // call the old resize function as well if we overwrote one
-          if(oldResize){
-              oldResize();
-          }
-      }
-      window.onresize = newResize;
-
-  } else {
-    console.log("Error: Connection not established. Unable to stream screen");
-  }
-};
-
-Mirror.prototype.mirrorScreen = function(data) {
-  var _this = this;
-
-  function clearPage() {
-    // clear page //
-    while (_this.mirrorDocument.firstChild) {
-      _this.mirrorDocument.removeChild(_this.mirrorDocument.firstChild);
-    }
-  }
-
-  function handleMessage(msg) {
-    if (msg.clear){
-      clearPage();
-    }
-    else if (msg.base){
-      _this.base = msg.base;
-    }
-    else if (msg.request === MAQAW_MIRROR_ENUMS.SCREEN_DATA){
-      _this._mirror[msg.f].apply(_this._mirror, msg.args);
-    }
-    else if (msg.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE || msg.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK){
-        _this.mouseMirror.data(msg);
-    }
-    else if (msg.request === MAQAW_MIRROR_ENUMS.INPUT) {
-      _this.inputMirror.data(msg);
-    }
-  }
-
-  var msg = data;
-  if (msg instanceof Array) {
-    msg.forEach(function(subMessage) {
-      handleMessage(JSON.parse(subMessage));
-    });
-  } else {
-    handleMessage(msg);
-  }
-};
-
-function MouseMirror(doc, options) {
-  this.CURSOR_RADIUS = 10;
-  this.moveEvent = options.mousemove;
-  this.clickEvent = options.click;
-  this.doc = doc;
-  var _this = this;
-  this.isRep = Boolean(options.rep);
-
-    // keep track of the last element that was clicked on
-  this.lastElementClicked;
-
-  this.cursor = this.doc.createElement('div'); 
-  this.cursor.style.backgroundImage = "url('http://gohapuna.com/wp/wp-content/uploads/2013/08/cursor.png')";
-  this.cursor.style.height = '30px';
-  this.cursor.style.width = '20px';
-  this.cursor.style.zIndex = 10000;
-  this.cursor.style.position = 'absolute';
-  this.cursor.style.top = '0px';
-  this.cursor.style.left = '0px';
-  this.cursor.setAttribute("ignore", "true");
-
-    // maximum number of times per second mouse movement data will be sent
-    var MAX_SEND_RATE = 40;
-    // has enough time elapsed to send data again?
-    var isMouseTimeUp = true;
-    function moveMouse(event){
-      if(isMouseTimeUp){
-          _this.moveEvent(event);
-          isMouseTimeUp = false;
-          setTimeout(function(){isMouseTimeUp = true;}, 1000 / MAX_SEND_RATE);
-      }
-    }
-
-
-  this.doc.addEventListener('mousemove', moveMouse, false);
-  this.doc.addEventListener('click', this.clickEvent, false);
-
-
-  this.isDrawn = false;
-
-  return this;
-}
-
-MouseMirror.prototype.data = function(_data) {
-
-  if (!this.isDrawn) {
-    //  Hack that appends cursor only  
-    //  once a document.body exists
-    if (this.doc.body) {
-      this.doc.body.appendChild(this.cursor);
-      this.isDrawn = true;
-    }
-  }
-
-  if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE) {
-    this.moveMouse(_data);
-  } else if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK) {
-    this.clickMouse(_data);
-  }
-
-};
-
-MouseMirror.prototype.moveMouse = function(_data) {
-  this.cursor.style.top = _data.coords.y + 'px';
-  this.cursor.style.left = _data.coords.x + 'px';
-};
-
-MouseMirror.prototype.clickMouse = function(_data) {
-    var x = _data.coords.x;
-    var y = _data.coords.y;
-    var _this = this;
-
-    // get the clicked element
-    var target = maqawGetNodeFromHierarchy(this.doc, _data.target);
-    // remove highlight from last clicked element
-    if(this.lastElementClicked){
-        if(this.isRep){
-            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element-rep\b/,'');
-        }
-        else {
-            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element\b/,'');
-        }
-    }
-    // highlight the element that was clicked if it wasn't the body
-    if(target.tagName !== 'BODY'){
-        if(this.isRep){
-            target.className = target.className + ' maqaw-mirror-clicked-element-rep';
-        } else {
-            target.className = target.className + ' maqaw-mirror-clicked-element';
-        }
-        this.lastElementClicked = target;
-    }
-
-
-    function makeExpandingRing(){
-        var radius = 1;
-        var click = _this.doc.createElement('div');
-        click.style.width = 2*radius + 'px';
-        click.style.height = 2*radius + 'px';
-        click.style.backgroundColor = 'transparent';
-        click.style.border = '2px solid rgba(255, 255, 0, 1)';
-        click.style.borderRadius = '999px';
-        click.style.zIndex = 10000;
-        click.style.position = 'absolute';
-        click.style.top = y - radius + 'px';
-        click.style.left = x - radius + 'px';
-        click.setAttribute("ignore", "true");
-        _this.doc.body.appendChild(click);
-
-        var rate = 50;
-        var radiusIncrease = 2;
-        var transparency = 1;
-        var transparencyRate = .03;
-
-        (function expand() {
-            radius += radiusIncrease;
-            transparency -= transparencyRate;
-            click.style.border = '2px solid rgba(255, 255, 0, ' + transparency + ')';
-            click.style.width = 2*radius + 'px';
-            click.style.height = 2*radius + 'px';
-            click.style.top = y - radius + 'px';
-            click.style.left = x - radius + 'px';
-
-            if(transparency > 0){
-                setTimeout(expand, rate);
-            } else {
-                _this.doc.body.removeChild(click);
-            }
-        })();
-    }
-
-    var numRings = 6;
-    var ringSpacing = 300;
-    var ringCounter = 0;
-
-    function doRings (){
-        if(ringCounter < numRings){
-            makeExpandingRing();
-            ringCounter++;
-            setTimeout(doRings, ringSpacing);
-        }
-    }
-};
-
-MouseMirror.prototype.off = function() {
-  this.doc.removeEventListener('mousemove', this.moveEvent, false);
-  this.doc.removeEventListener('click', this.clickEvent, false);
-};
-
-
-/*
- * Attach listeners to input elements so that they can be mirrored.
- * doc - The document to search for input elements
- * conn - The connection to use to send mirror updates about the inputs
- */
-function MaqawInputMirror(doc, options){
-    this.doc = doc;
-    var _this = this;
-
-    this.radioAndCheckbox = options.radioAndCheckbox;
-    this.singleSelect = options.singleSelect;
-    this.multipleSelect = options.multipleSelect;
-    this.inputDefault = options.inputDefault;
-
-    function keyUpEvent(event){
-        var target = event.target;
-        if(target.tagName === 'INPUT'){
-            (_this.inputDefault.bind(target))();
-        }
-
-        else if(target.tagName === 'TEXTAREA'){
-            (_this.inputDefault.bind(target))();
-        }
-    }
-
-    function changeEvent(event){
-        var target = event.target;
-        if(target.tagName === 'INPUT'){
-            if(target.type === 'radio' || target.type === 'checkbox'){
-                (_this.radioAndCheckbox.bind(target))();
-            } else {
-                (_this.inputDefault.bind(target))();
-            }
-        }
-
-        else if(target.tagName === 'SELECT'){
-            if(target.type === 'select-one'){
-                (_this.singleSelect.bind(target))();
-            } else if(target.type === 'select-multiple'){
-                (_this.multipleSelect.bind(target))();
-            }
-        }
-    }
-
-    this.doc.addEventListener('keyup', keyUpEvent, false);
-    this.doc.addEventListener('change', changeEvent, false);
-}
-
-MaqawInputMirror.prototype.data = function(data){
-    // get the DOM node that was changed
-    var inputNode = maqawGetNodeFromHierarchy(this.doc, data.index);
-
-    // set the checked attribute if applicable
-    if(typeof data.checked !== 'undefined'){
-        inputNode.checked = data.checked;
-    }
-
-    // check for select options
-    else if (typeof data.selectedIndex !== 'undefined'){
-        inputNode.selectedIndex = data.selectedIndex;
-    }
-
-    // check for multiple select options
-    else if (typeof data.selectedOptions !== 'undefined'){
-        var i, option, length = inputNode.options.length, selectedOptions = data.selectedOptions,
-            optionsList = inputNode.options;
-        for (i = 0; i < length; i++ ) {
-            option = optionsList[i];
-            var index = selectedOptions.indexOf(option.text);
-            if(index !== -1){
-                option.selected = true;
-            } else {
-                option.selected = false;
-            }
-
-        }
-    }
-
-    // otherwise set text value
-    else {
-        inputNode.value = data.text;
-    }
-};
-
-MaqawInputMirror.prototype.off = function() {
-    this.doc.removeEventListener('keyup', this.inputDefault, false);
-    this.doc.removeEventListener('change', this.radioAndCheckbox, false);
-    this.doc.removeEventListener('change', this.singleSelect, false);
-    this.doc.removeEventListener('change', this.multipleSelect, false);
-};
-// Copyright 2011 Google Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-function TreeMirror(root, delegate) {
-  this.root = root;
-  this.idMap = {};
-  this.delegate = delegate;
-}
-
-TreeMirror.prototype = {
-  initialize: function(rootId, children) {
-    this.idMap[rootId] = this.root;
-
-    for (var i = 0; i < children.length; i++)
-      this.deserializeNode(children[i], this.root);
-  },
-
-  deserializeNode: function(nodeData, parent) {
-    if (nodeData === null)
-      return null;
-
-    if (typeof nodeData == 'number')
-      return this.idMap[nodeData];
-
-    var doc = this.root; //instanceof HTMLDocument ? this.root : this.root.ownerDocument;
-
-    var node;
-    switch(nodeData.nodeType) {
-      case Node.COMMENT_NODE:
-        node = doc.createComment(nodeData.textContent);
-        break;
-
-      case Node.TEXT_NODE:
-        node = doc.createTextNode(nodeData.textContent);
-        break;
-
-      case Node.DOCUMENT_TYPE_NODE:
-        node = doc.implementation.createDocumentType(nodeData.name, nodeData.publicId, nodeData.systemId);
-        break;
-
-      case Node.ELEMENT_NODE:
-        //  Check if node has ignore attribute  if so, do not render. //
-        if (nodeData.attributes && nodeData.attributes["ignore"])
-          return;
-
-        if (this.delegate && this.delegate.createElement)
-          node = this.delegate.createElement(nodeData.tagName);
-        if (!node)
-          node = doc.createElement(nodeData.tagName);
-
-        Object.keys(nodeData.attributes).forEach(function(name) {
-          if (!this.delegate ||
-              !this.delegate.setAttribute ||
-              !this.delegate.setAttribute(node, name, nodeData.attributes[name])) {
-            node.setAttribute(name, nodeData.attributes[name]);
-          }
-        }, this);
-
-        break;
-    }
-
-    this.idMap[nodeData.id] = node;
-
-    if (parent)
-      parent.appendChild(node);
-
-    if (nodeData.childNodes) {
-      for (var i = 0; i < nodeData.childNodes.length; i++)
-        this.deserializeNode(nodeData.childNodes[i], node);
-    }
-
-    return node;
-  },
-
-  applyChanged: function(removed, addedOrMoved, attributes, text) {
-    function removeNode(node) {
-      if (node.parentNode)
-        node.parentNode.removeChild(node);
-    }
-
-    function moveOrInsertNode(data) {
-      var parent = data.parentNode;
-      var previous = data.previousSibling;
-      var node = data.node;
-
-      parent.insertBefore(node, previous ? previous.nextSibling : parent.firstChild);
-    }
-
-    function updateAttributes(data) {
-      var node = this.deserializeNode(data.node);
-      Object.keys(data.attributes).forEach(function(attrName) {
-        var newVal = data.attributes[attrName];
-        if (newVal === null) {
-          node.removeAttribute(attrName);
-        } else {
-          if (!this.delegate ||
-              !this.delegate.setAttribute ||
-              !this.delegate.setAttribute(node, attrName, newVal)) {
-            node.setAttribute(attrName, newVal);
-          }
-        }
-      }, this);
-    }
-
-    function updateText(data) {
-      var node = this.deserializeNode(data.node);
-      node.textContent = data.textContent;
-    }
-
-    addedOrMoved.forEach(function(data) {
-      data.node = this.deserializeNode(data.node);
-      data.previousSibling = this.deserializeNode(data.previousSibling);
-      data.parentNode = this.deserializeNode(data.parentNode);
-
-      // NOTE: Applying the changes can result in an attempting to add a child
-      // to a parent which is presently an ancestor of the parent. This can occur
-      // based on random ordering of moves. The way we handle this is to first
-      // remove all changed nodes from their parents, then apply.
-      removeNode(data.node);
-    }, this);
-
-    removed.map(this.deserializeNode, this).forEach(removeNode);
-    addedOrMoved.forEach(moveOrInsertNode);
-    attributes.forEach(updateAttributes, this);
-    text.forEach(updateText, this);
-
-    removed.forEach(function(id) {
-      delete this.idMap[id]
-    }, this);
-  }
-}
-
-function TreeMirrorClient(target, mirror, testingQueries) {
-  this.target = target;
-  this.mirror = mirror;
-  this.knownNodes = new MutationSummary.NodeMap;
-
-  var rootId = this.serializeNode(target).id;
-  var children = [];
-  for (var child = target.firstChild; child; child = child.nextSibling)
-    children.push(this.serializeNode(child, true));
-
-  this.mirror.initialize(rootId, children);
-
-  var self = this;
-
-  var queries = [{ all: true }];
-
-  if (testingQueries)
-    queries = queries.concat(testingQueries);
-
-  this.mutationSummary = new MutationSummary({
-    rootNode: target,
-    callback: function(summaries) {
-      self.applyChanged(summaries);
-    },
-    queries: queries
-  });
-}
-
-TreeMirrorClient.prototype = {
-  nextId: 1,
-
-  disconnect: function() {
-    if (this.mutationSummary) {
-      this.mutationSummary.disconnect();
-      this.mutationSummary = undefined;
-    }
-  },
-
-  rememberNode: function(node) {
-    var id = this.nextId++;
-    this.knownNodes.set(node, id);
-    return id;
-  },
-
-  forgetNode: function(node) {
-    delete this.knownNodes.delete(node);
-  },
-
-  serializeNode: function(node, recursive) {
-    if (node === null)
-      return null;
-
-    var id = this.knownNodes.get(node);
-    if (id !== undefined) {
-      return id;
-    }
-
-    var data = {
-      nodeType: node.nodeType,
-      id: this.rememberNode(node)
-    };
-
-    switch(data.nodeType) {
-      case Node.DOCUMENT_TYPE_NODE:
-        data.name = node.name;
-        data.publicId = node.publicId;
-        data.systemId = node.systemId;
-        break;
-
-      case Node.COMMENT_NODE:
-      case Node.TEXT_NODE:
-        data.textContent = node.textContent;
-        break;
-
-      case Node.ELEMENT_NODE:
-        data.tagName = node.tagName;
-        data.attributes = {};
-        for (var i = 0; i < node.attributes.length; i++) {
-          var attr = node.attributes.item(i);
-          data.attributes[attr.name] = attr.value;
-        }
-
-        if (recursive && node.childNodes.length) {
-          data.childNodes = [];
-
-          for (var child = node.firstChild; child; child = child.nextSibling)
-            data.childNodes.push(this.serializeNode(child, true));
-        }
-        break;
-    }
-
-    return data;
-  },
-
-  serializeAddedAndMoved: function(changed) {
-    var all = changed.added.concat(changed.reparented).concat(changed.reordered);
-
-    var parentMap = new MutationSummary.NodeMap;
-    all.forEach(function(node) {
-      var parent = node.parentNode;
-      var children = parentMap.get(parent)
-      if (!children) {
-        children = new MutationSummary.NodeMap;
-        parentMap.set(parent, children);
-      }
-
-      children.set(node, true);
-    });
-
-    var moved = [];
-
-    parentMap.keys().forEach(function(parent) {
-      var children = parentMap.get(parent);
-
-      var keys = children.keys();
-      while (keys.length) {
-        var node = keys[0];
-        while (node.previousSibling && children.has(node.previousSibling))
-          node = node.previousSibling;
-
-        while (node && children.has(node)) {
-          moved.push({
-            node: this.serializeNode(node),
-            previousSibling: this.serializeNode(node.previousSibling),
-            parentNode: this.serializeNode(node.parentNode)
-          });
-
-          children.delete(node);
-          node = node.nextSibling;
-        }
-
-        var keys = children.keys();
-      }
-    }, this);
-
-    return moved;
-  },
-
-  serializeAttributeChanges: function(attributeChanged) {
-    var map = new MutationSummary.NodeMap;
-
-    Object.keys(attributeChanged).forEach(function(attrName) {
-      attributeChanged[attrName].forEach(function(element) {
-        var record = map.get(element);
-        if (!record) {
-          record = {
-            node: this.serializeNode(element),
-            attributes: {}
-          };
-          map.set(element, record);
-        }
-
-        record.attributes[attrName] = element.getAttribute(attrName);
-      }, this);
-    }, this);
-
-    return map.keys().map(function(element) {
-      return map.get(element);
-    });
-  },
-
-  serializeCharacterDataChange: function(node) {
-    return {
-      node: this.serializeNode(node),
-      textContent: node.textContent
-    }
-  },
-
-  applyChanged: function(summaries) {
-    var changed = summaries[0]
-    var removed = changed.removed.map(this.serializeNode, this);
-    var moved = this.serializeAddedAndMoved(changed);
-    var attributes = this.serializeAttributeChanges(changed.attributeChanged);
-    var text = changed.characterDataChanged.map(this.serializeCharacterDataChange, this);
-
-    this.mirror.applyChanged(removed, moved, attributes, text);
-
-    changed.removed.forEach(this.forgetNode, this);
-  }
-}
 // Copyright 2011 Google Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -2607,6 +1660,953 @@ TreeMirrorClient.prototype = {
   global.MutationSummary.NodeMap = NodeMap; // exposed for use in TreeMirror.
   global.MutationSummary.parseElementFilter = parseElementFilter; // exposed for testing.
 })(this);
+// Copyright 2011 Google Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+function TreeMirror(root, delegate) {
+  this.root = root;
+  this.idMap = {};
+  this.delegate = delegate;
+}
+
+TreeMirror.prototype = {
+  initialize: function(rootId, children) {
+    this.idMap[rootId] = this.root;
+
+    for (var i = 0; i < children.length; i++)
+      this.deserializeNode(children[i], this.root);
+  },
+
+  deserializeNode: function(nodeData, parent) {
+    if (nodeData === null)
+      return null;
+
+    if (typeof nodeData == 'number')
+      return this.idMap[nodeData];
+
+    var doc = this.root; //instanceof HTMLDocument ? this.root : this.root.ownerDocument;
+
+    var node;
+    switch(nodeData.nodeType) {
+      case Node.COMMENT_NODE:
+        node = doc.createComment(nodeData.textContent);
+        break;
+
+      case Node.TEXT_NODE:
+        node = doc.createTextNode(nodeData.textContent);
+        break;
+
+      case Node.DOCUMENT_TYPE_NODE:
+        node = doc.implementation.createDocumentType(nodeData.name, nodeData.publicId, nodeData.systemId);
+        break;
+
+      case Node.ELEMENT_NODE:
+        //  Check if node has ignore attribute  if so, do not render. //
+        if (nodeData.attributes && nodeData.attributes["ignore"])
+          return;
+
+        if (this.delegate && this.delegate.createElement)
+          node = this.delegate.createElement(nodeData.tagName);
+        if (!node)
+          node = doc.createElement(nodeData.tagName);
+
+        Object.keys(nodeData.attributes).forEach(function(name) {
+          if (!this.delegate ||
+              !this.delegate.setAttribute ||
+              !this.delegate.setAttribute(node, name, nodeData.attributes[name])) {
+            node.setAttribute(name, nodeData.attributes[name]);
+          }
+        }, this);
+
+        break;
+    }
+
+    this.idMap[nodeData.id] = node;
+
+    if (parent)
+      parent.appendChild(node);
+
+    if (nodeData.childNodes) {
+      for (var i = 0; i < nodeData.childNodes.length; i++)
+        this.deserializeNode(nodeData.childNodes[i], node);
+    }
+
+    return node;
+  },
+
+  applyChanged: function(removed, addedOrMoved, attributes, text) {
+    function removeNode(node) {
+      if (node.parentNode)
+        node.parentNode.removeChild(node);
+    }
+
+    function moveOrInsertNode(data) {
+      var parent = data.parentNode;
+      var previous = data.previousSibling;
+      var node = data.node;
+
+      parent.insertBefore(node, previous ? previous.nextSibling : parent.firstChild);
+    }
+
+    function updateAttributes(data) {
+      var node = this.deserializeNode(data.node);
+      Object.keys(data.attributes).forEach(function(attrName) {
+        var newVal = data.attributes[attrName];
+        if (newVal === null) {
+          node.removeAttribute(attrName);
+        } else {
+          if (!this.delegate ||
+              !this.delegate.setAttribute ||
+              !this.delegate.setAttribute(node, attrName, newVal)) {
+            node.setAttribute(attrName, newVal);
+          }
+        }
+      }, this);
+    }
+
+    function updateText(data) {
+      var node = this.deserializeNode(data.node);
+      node.textContent = data.textContent;
+    }
+
+    addedOrMoved.forEach(function(data) {
+      data.node = this.deserializeNode(data.node);
+      data.previousSibling = this.deserializeNode(data.previousSibling);
+      data.parentNode = this.deserializeNode(data.parentNode);
+
+      // NOTE: Applying the changes can result in an attempting to add a child
+      // to a parent which is presently an ancestor of the parent. This can occur
+      // based on random ordering of moves. The way we handle this is to first
+      // remove all changed nodes from their parents, then apply.
+      removeNode(data.node);
+    }, this);
+
+    removed.map(this.deserializeNode, this).forEach(removeNode);
+    addedOrMoved.forEach(moveOrInsertNode);
+    attributes.forEach(updateAttributes, this);
+    text.forEach(updateText, this);
+
+    removed.forEach(function(id) {
+      delete this.idMap[id]
+    }, this);
+  }
+}
+
+function TreeMirrorClient(target, mirror, testingQueries) {
+  this.target = target;
+  this.mirror = mirror;
+  this.knownNodes = new MutationSummary.NodeMap;
+
+  var rootId = this.serializeNode(target).id;
+  var children = [];
+  for (var child = target.firstChild; child; child = child.nextSibling)
+    children.push(this.serializeNode(child, true));
+
+  this.mirror.initialize(rootId, children);
+
+  var self = this;
+
+  var queries = [{ all: true }];
+
+  if (testingQueries)
+    queries = queries.concat(testingQueries);
+
+  this.mutationSummary = new MutationSummary({
+    rootNode: target,
+    callback: function(summaries) {
+      self.applyChanged(summaries);
+    },
+    queries: queries
+  });
+}
+
+TreeMirrorClient.prototype = {
+  nextId: 1,
+
+  disconnect: function() {
+    if (this.mutationSummary) {
+      this.mutationSummary.disconnect();
+      this.mutationSummary = undefined;
+    }
+  },
+
+  rememberNode: function(node) {
+    var id = this.nextId++;
+    this.knownNodes.set(node, id);
+    return id;
+  },
+
+  forgetNode: function(node) {
+    delete this.knownNodes.delete(node);
+  },
+
+  serializeNode: function(node, recursive) {
+    if (node === null)
+      return null;
+
+    var id = this.knownNodes.get(node);
+    if (id !== undefined) {
+      return id;
+    }
+
+    var data = {
+      nodeType: node.nodeType,
+      id: this.rememberNode(node)
+    };
+
+    switch(data.nodeType) {
+      case Node.DOCUMENT_TYPE_NODE:
+        data.name = node.name;
+        data.publicId = node.publicId;
+        data.systemId = node.systemId;
+        break;
+
+      case Node.COMMENT_NODE:
+      case Node.TEXT_NODE:
+        data.textContent = node.textContent;
+        break;
+
+      case Node.ELEMENT_NODE:
+        data.tagName = node.tagName;
+        data.attributes = {};
+        for (var i = 0; i < node.attributes.length; i++) {
+          var attr = node.attributes.item(i);
+          data.attributes[attr.name] = attr.value;
+        }
+
+        if (recursive && node.childNodes.length) {
+          data.childNodes = [];
+
+          for (var child = node.firstChild; child; child = child.nextSibling)
+            data.childNodes.push(this.serializeNode(child, true));
+        }
+        break;
+    }
+
+    return data;
+  },
+
+  serializeAddedAndMoved: function(changed) {
+    var all = changed.added.concat(changed.reparented).concat(changed.reordered);
+
+    var parentMap = new MutationSummary.NodeMap;
+    all.forEach(function(node) {
+      var parent = node.parentNode;
+      var children = parentMap.get(parent)
+      if (!children) {
+        children = new MutationSummary.NodeMap;
+        parentMap.set(parent, children);
+      }
+
+      children.set(node, true);
+    });
+
+    var moved = [];
+
+    parentMap.keys().forEach(function(parent) {
+      var children = parentMap.get(parent);
+
+      var keys = children.keys();
+      while (keys.length) {
+        var node = keys[0];
+        while (node.previousSibling && children.has(node.previousSibling))
+          node = node.previousSibling;
+
+        while (node && children.has(node)) {
+          moved.push({
+            node: this.serializeNode(node),
+            previousSibling: this.serializeNode(node.previousSibling),
+            parentNode: this.serializeNode(node.parentNode)
+          });
+
+          children.delete(node);
+          node = node.nextSibling;
+        }
+
+        var keys = children.keys();
+      }
+    }, this);
+
+    return moved;
+  },
+
+  serializeAttributeChanges: function(attributeChanged) {
+    var map = new MutationSummary.NodeMap;
+
+    Object.keys(attributeChanged).forEach(function(attrName) {
+      attributeChanged[attrName].forEach(function(element) {
+        var record = map.get(element);
+        if (!record) {
+          record = {
+            node: this.serializeNode(element),
+            attributes: {}
+          };
+          map.set(element, record);
+        }
+
+        record.attributes[attrName] = element.getAttribute(attrName);
+      }, this);
+    }, this);
+
+    return map.keys().map(function(element) {
+      return map.get(element);
+    });
+  },
+
+  serializeCharacterDataChange: function(node) {
+    return {
+      node: this.serializeNode(node),
+      textContent: node.textContent
+    }
+  },
+
+  applyChanged: function(summaries) {
+    var changed = summaries[0]
+    var removed = changed.removed.map(this.serializeNode, this);
+    var moved = this.serializeAddedAndMoved(changed);
+    var attributes = this.serializeAttributeChanges(changed.attributeChanged);
+    var text = changed.characterDataChanged.map(this.serializeCharacterDataChange, this);
+
+    this.mirror.applyChanged(removed, moved, attributes, text);
+
+    changed.removed.forEach(this.forgetNode, this);
+  }
+}
+var MAQAW_MIRROR_ENUMS = {
+  SHARE_SCREEN: 0, 
+  SHARE_SCREEN_OK: 1,
+  SHARE_SCREEN_REFUSE: 2,
+  SCREEN_DATA: 3,
+  MOUSE_MOVE: 4,
+  MOUSE_CLICK: 5,
+  SCROLL: 6,
+  INPUT: 7,
+  SIZE_REQUEST: 8,
+  SIZE: 9
+};
+
+function Mirror(options) {
+  // stores connection object if exists
+  this.conn = options && options.conn;
+  this.base;
+
+  this.mirrorDocument;
+  this.mirrorWindow;
+  this.mouseMirror;
+  this.inputMirror;
+
+  // whether or not we are currently viewing our peer's screen
+  this.isViewingScreen = false;
+
+}
+
+/*
+ * Called when the connection to our peer is reset
+ */
+Mirror.prototype.connectionReset = function () {
+   // if we were watching our peer's screen, tell that to start sending screen
+   //data again
+    if(this.mirrorWindow && !this.mirrorWindow.closed){
+        this.requestScreen();
+    }
+};
+
+Mirror.prototype.data = function(_data) {
+  //
+  // handle new data. For a new share screen
+  // request, function opens a new mirror
+  // for all other requests, function passes
+  // data to mirrorScreen
+  //
+  switch(_data.request) {
+    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN:
+      // Request from peer to view this screen  
+      this.conn.send({ type: MAQAW_DATA_TYPE.SCREEN, request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK });
+      this.shareScreen();
+      break;
+    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK:
+      //  Share screen request received and 
+      //  validated open a screen mirror 
+      this.openMirror();
+      break;
+    case MAQAW_MIRROR_ENUMS.SCREEN_DATA:
+      //  Screen Data.
+    case MAQAW_MIRROR_ENUMS.MOUSE_CLICK:
+      // Mouse click event
+    case MAQAW_MIRROR_ENUMS.MOUSE_MOVE:
+      // Mouse move event
+    case MAQAW_MIRROR_ENUMS.INPUT:
+      // Interactions with input elements
+      this.mirrorScreen(_data);  
+      break;
+    case MAQAW_MIRROR_ENUMS.SCROLL:
+      this.mirrorWindow.scrollTo(_data.left, _data.top);
+      break;
+    case MAQAW_MIRROR_ENUMS.SIZE:
+      this.mirrorDocument.body.style.width = _data.width;
+      break;
+    case MAQAW_MIRROR_ENUMS.SIZE_REQUEST:
+      this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.SIZE,
+        width: document.body.clientWidth
+      });
+      break;
+    default:
+      // Unknown
+      break;
+  }
+};
+
+Mirror.prototype.openMirror = function() {
+  var _this = this;
+
+  // if we are already viewing the screen, don't open a new window
+    if(!this.isViewingScreen) {
+         this.mirrorWindow = window.open();
+         this.mirrorDocument = this.mirrorWindow.document;
+
+        // attach a listener for if the window is closed
+        this.mirrorWindow.addEventListener('unload', function() {
+            // TODO: implement me
+            _this.isViewingScreen = false;
+        }, false);
+
+        // request dimensions for body
+        _this.conn.send({
+            type: MAQAW_DATA_TYPE.SCREEN,
+            request: MAQAW_MIRROR_ENUMS.SIZE_REQUEST
+        });
+
+    }
+
+    this.isViewingScreen = true;
+
+  this._mirror = new TreeMirror(this.mirrorDocument, {
+    createElement: function(tagName) {
+      if (tagName == 'SCRIPT') {
+        var node = _this.mirrorDocument.createElement('NO-SCRIPT');
+        node.style.display = 'none';
+        return node;
+      }
+
+      if (tagName == 'HEAD') {
+        var node = _this.mirrorDocument.createElement('HEAD');
+        node.appendChild(_this.mirrorDocument.createElement('BASE'));
+        node.firstChild.href = _this.base;
+        return node;
+      }
+    }
+  });
+  
+  this.mouseMirror = new MouseMirror(this.mirrorDocument, {
+    mousemove: function(event) {
+      _this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
+        coords: {x: event.pageX, y: event.pageY}
+      });
+    }, 
+    click: function(event) {
+        _this.conn.send({
+            type: MAQAW_DATA_TYPE.SCREEN,
+            request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
+            coords: {x: event.pageX, y: event.pageY},
+            target: maqawGetNodeHierarchy(_this.mirrorDocument, event.target)
+        });
+    },
+    rep: true
+  });
+
+  this.inputMirror = new MaqawInputMirror(this.mirrorDocument, {
+      multipleSelect: function(){
+          // get list of selected options
+          var selectedOptions = [];
+          for(var j = 0; j < this.selectedOptions.length; j++){
+              selectedOptions.push(this.selectedOptions[j].text);
+          }
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              selectedOptions: selectedOptions
+          });
+      },
+      singleSelect: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              selectedIndex: this.selectedIndex
+          });
+      }
+          ,
+      inputDefault: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              text: this.value
+          });
+      }
+          ,
+      radioAndCheckbox: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              checked: this.checked
+          });
+      }
+  });
+};
+
+Mirror.prototype.setConnection = function(conn) {
+  // set a connection if established later
+  this.conn = conn;
+};
+
+Mirror.prototype.requestScreen = function() {
+  //
+  //  Sends share screen request to peer
+  //
+  if (this.conn) {
+    this.conn.send({ 
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN
+    });
+  }
+};
+
+Mirror.prototype.shareScreen = function() {
+  //
+  // streams screen to peer
+  //
+  var _this = this;
+  if (this.conn) {
+
+    this.conn.send({
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+      clear: true 
+    });
+
+    this.conn.send({
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+      base: location.href.match(/^(.*\/)[^\/]*$/)[1] 
+    });
+
+    var mirrorClient = new TreeMirrorClient(document, {
+
+      initialize: function(rootId, children) {
+        _this.conn.send({
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+          f: 'initialize',
+          args: [rootId, children]
+        });
+      },
+
+      applyChanged: function(removed, addedOrMoved, attributes, text) {
+        _this.conn.send({
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+          f: 'applyChanged',
+          args: [removed, addedOrMoved, attributes, text]
+        });
+      }
+    });
+
+    // remove old mouse mirror if applicable so there isn't a duplicate cursor
+    // from two screen sharing sessions
+
+    this.mouseMirror = new MouseMirror(document, {
+      mousemove: function(event) {
+        _this.conn.send({ 
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
+          coords: {x: event.pageX, y: event.pageY}
+        });
+      }, 
+      click: function(event) {
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
+              coords: {x: event.pageX, y: event.pageY},
+              target: maqawGetNodeHierarchy(document, event.target)
+          });
+      }
+    });
+  
+    // Set up scroll listener
+    window.addEventListener('scroll', scrollListener, false);
+    function scrollListener(){
+      var top = window.pageYOffset;
+      var left = window.pageXOffset;
+      _this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.SCROLL,
+        top: top,
+        left: left
+      });
+    }
+
+
+
+    /* Set up listeners to input events */
+      this.inputMirror = new MaqawInputMirror(document, {
+          multipleSelect: function(){
+              // get list of selected options
+              var selectedOptions = [];
+              for(var j = 0; j < this.selectedOptions.length; j++){
+                  selectedOptions.push(this.selectedOptions[j].text);
+              }
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  selectedOptions: selectedOptions
+              });
+          },
+          singleSelect: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  selectedIndex: this.selectedIndex
+              });
+          }
+          ,
+          inputDefault: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  text: this.value
+              });
+          }
+          ,
+          radioAndCheckbox: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  checked: this.checked
+              });
+          }
+      });
+
+      // listener for window resize
+      var oldResize = window.onresize;
+      function newResize (){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.SIZE,
+              width: document.body.clientWidth
+          });
+
+          // call the old resize function as well if we overwrote one
+          if(oldResize){
+              oldResize();
+          }
+      }
+      window.onresize = newResize;
+
+  } else {
+    console.log("Error: Connection not established. Unable to stream screen");
+  }
+};
+
+Mirror.prototype.mirrorScreen = function(data) {
+  var _this = this;
+
+  function clearPage() {
+    // clear page //
+    while (_this.mirrorDocument.firstChild) {
+      _this.mirrorDocument.removeChild(_this.mirrorDocument.firstChild);
+    }
+  }
+
+  function handleMessage(msg) {
+    if (msg.clear){
+      clearPage();
+    }
+    else if (msg.base){
+      _this.base = msg.base;
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.SCREEN_DATA){
+      _this._mirror[msg.f].apply(_this._mirror, msg.args);
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE || msg.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK){
+        _this.mouseMirror.data(msg);
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.INPUT) {
+      _this.inputMirror.data(msg);
+    }
+  }
+
+  var msg = data;
+  if (msg instanceof Array) {
+    msg.forEach(function(subMessage) {
+      handleMessage(JSON.parse(subMessage));
+    });
+  } else {
+    handleMessage(msg);
+  }
+};
+
+function MouseMirror(doc, options) {
+  this.CURSOR_RADIUS = 10;
+  this.moveEvent = options.mousemove;
+  this.clickEvent = options.click;
+  this.doc = doc;
+  var _this = this;
+  this.isRep = Boolean(options.rep);
+
+    // keep track of the last element that was clicked on
+  this.lastElementClicked;
+
+  this.cursor = this.doc.createElement('div'); 
+  this.cursor.style.backgroundImage = "url('http://gohapuna.com/wp/wp-content/uploads/2013/08/cursor.png')";
+  this.cursor.style.height = '30px';
+  this.cursor.style.width = '20px';
+  this.cursor.style.zIndex = 10000;
+  this.cursor.style.position = 'absolute';
+  this.cursor.style.top = '0px';
+  this.cursor.style.left = '0px';
+  this.cursor.setAttribute("ignore", "true");
+
+    // maximum number of times per second mouse movement data will be sent
+    var MAX_SEND_RATE = 40;
+    // has enough time elapsed to send data again?
+    var isMouseTimeUp = true;
+    function moveMouse(event){
+      if(isMouseTimeUp){
+          _this.moveEvent(event);
+          isMouseTimeUp = false;
+          setTimeout(function(){isMouseTimeUp = true;}, 1000 / MAX_SEND_RATE);
+      }
+    }
+
+
+  this.doc.addEventListener('mousemove', moveMouse, false);
+  this.doc.addEventListener('click', this.clickEvent, false);
+
+
+  this.isDrawn = false;
+
+  return this;
+}
+
+MouseMirror.prototype.data = function(_data) {
+
+  if (!this.isDrawn) {
+    //  Hack that appends cursor only  
+    //  once a document.body exists
+    if (this.doc.body) {
+      this.doc.body.appendChild(this.cursor);
+      this.isDrawn = true;
+    }
+  }
+
+  if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE) {
+    this.moveMouse(_data);
+  } else if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK) {
+    this.clickMouse(_data);
+  }
+
+};
+
+MouseMirror.prototype.moveMouse = function(_data) {
+  this.cursor.style.top = _data.coords.y + 'px';
+  this.cursor.style.left = _data.coords.x + 'px';
+};
+
+MouseMirror.prototype.clickMouse = function(_data) {
+    var x = _data.coords.x;
+    var y = _data.coords.y;
+    var _this = this;
+
+    // get the clicked element
+    var target = maqawGetNodeFromHierarchy(this.doc, _data.target);
+    // remove highlight from last clicked element
+    if(this.lastElementClicked){
+        if(this.isRep){
+            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element-rep\b/,'');
+        }
+        else {
+            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element\b/,'');
+        }
+    }
+    // highlight the element that was clicked if it wasn't the body
+    if(target.tagName !== 'BODY'){
+        if(this.isRep){
+            target.className = target.className + ' maqaw-mirror-clicked-element-rep';
+        } else {
+            target.className = target.className + ' maqaw-mirror-clicked-element';
+        }
+        this.lastElementClicked = target;
+    }
+
+
+    function makeExpandingRing(){
+        var radius = 1;
+        var click = _this.doc.createElement('div');
+        click.style.width = 2*radius + 'px';
+        click.style.height = 2*radius + 'px';
+        click.style.backgroundColor = 'transparent';
+        click.style.border = '2px solid rgba(255, 255, 0, 1)';
+        click.style.borderRadius = '999px';
+        click.style.zIndex = 10000;
+        click.style.position = 'absolute';
+        click.style.top = y - radius + 'px';
+        click.style.left = x - radius + 'px';
+        click.setAttribute("ignore", "true");
+        _this.doc.body.appendChild(click);
+
+        var rate = 50;
+        var radiusIncrease = 2;
+        var transparency = 1;
+        var transparencyRate = .03;
+
+        (function expand() {
+            radius += radiusIncrease;
+            transparency -= transparencyRate;
+            click.style.border = '2px solid rgba(255, 255, 0, ' + transparency + ')';
+            click.style.width = 2*radius + 'px';
+            click.style.height = 2*radius + 'px';
+            click.style.top = y - radius + 'px';
+            click.style.left = x - radius + 'px';
+
+            if(transparency > 0){
+                setTimeout(expand, rate);
+            } else {
+                _this.doc.body.removeChild(click);
+            }
+        })();
+    }
+
+    var numRings = 6;
+    var ringSpacing = 300;
+    var ringCounter = 0;
+
+    function doRings (){
+        if(ringCounter < numRings){
+            makeExpandingRing();
+            ringCounter++;
+            setTimeout(doRings, ringSpacing);
+        }
+    }
+};
+
+MouseMirror.prototype.off = function() {
+  this.doc.removeEventListener('mousemove', this.moveEvent, false);
+  this.doc.removeEventListener('click', this.clickEvent, false);
+};
+
+
+/*
+ * Attach listeners to input elements so that they can be mirrored.
+ * doc - The document to search for input elements
+ * conn - The connection to use to send mirror updates about the inputs
+ */
+function MaqawInputMirror(doc, options){
+    this.doc = doc;
+    var _this = this;
+
+    this.radioAndCheckbox = options.radioAndCheckbox;
+    this.singleSelect = options.singleSelect;
+    this.multipleSelect = options.multipleSelect;
+    this.inputDefault = options.inputDefault;
+
+    function keyUpEvent(event){
+        var target = event.target;
+        if(target.tagName === 'INPUT'){
+            (_this.inputDefault.bind(target))();
+        }
+
+        else if(target.tagName === 'TEXTAREA'){
+            (_this.inputDefault.bind(target))();
+        }
+    }
+
+    function changeEvent(event){
+        var target = event.target;
+        if(target.tagName === 'INPUT'){
+            if(target.type === 'radio' || target.type === 'checkbox'){
+                (_this.radioAndCheckbox.bind(target))();
+            } else {
+                (_this.inputDefault.bind(target))();
+            }
+        }
+
+        else if(target.tagName === 'SELECT'){
+            if(target.type === 'select-one'){
+                (_this.singleSelect.bind(target))();
+            } else if(target.type === 'select-multiple'){
+                (_this.multipleSelect.bind(target))();
+            }
+        }
+    }
+
+    this.doc.addEventListener('keyup', keyUpEvent, false);
+    this.doc.addEventListener('change', changeEvent, false);
+}
+
+MaqawInputMirror.prototype.data = function(data){
+    // get the DOM node that was changed
+    var inputNode = maqawGetNodeFromHierarchy(this.doc, data.index);
+
+    // set the checked attribute if applicable
+    if(typeof data.checked !== 'undefined'){
+        inputNode.checked = data.checked;
+    }
+
+    // check for select options
+    else if (typeof data.selectedIndex !== 'undefined'){
+        inputNode.selectedIndex = data.selectedIndex;
+    }
+
+    // check for multiple select options
+    else if (typeof data.selectedOptions !== 'undefined'){
+        var i, option, length = inputNode.options.length, selectedOptions = data.selectedOptions,
+            optionsList = inputNode.options;
+        for (i = 0; i < length; i++ ) {
+            option = optionsList[i];
+            var index = selectedOptions.indexOf(option.text);
+            if(index !== -1){
+                option.selected = true;
+            } else {
+                option.selected = false;
+            }
+
+        }
+    }
+
+    // otherwise set text value
+    else {
+        inputNode.value = data.text;
+    }
+};
+
+MaqawInputMirror.prototype.off = function() {
+    this.doc.removeEventListener('keyup', this.inputDefault, false);
+    this.doc.removeEventListener('change', this.radioAndCheckbox, false);
+    this.doc.removeEventListener('change', this.singleSelect, false);
+    this.doc.removeEventListener('change', this.multipleSelect, false);
+};
 // Displays the visitors chat sessions
 // chatWindow - the div that displays the chats
 function MaqawChatManager(chatWindow) {
@@ -5935,186 +5935,6 @@ MaqawVisitorSession.prototype.getHeaderContents = function () {
 };
 
 
-/*
- MaqawManager is the top level class for managing the Maqaw client
- */
-function MaqawManager(options, display) {
-    var that = this,
-        host = '54.214.232.157',
-        port = 3000;
-
-    // the key that peers will use to connect to each other on the peer server
-    this.key = options.key;
-    this.chatName = options.name;
-
-    // list of all visitors connected to the server
-    this.visitors = [];
-
-    // this id is used whenever the client makes a connection with peerjs
-    this.id = maqawCookies.getItem('peerId');
-    // an array of ids of representatives that are available for chat
-    this.maqawDisplay = display;
-    this.visitorSession;
-    this.repSession;
-
-    // a MaqawLoginPage object that can be used to login with rep details
-    this.loginPage;
-
-    if (this.id) {
-        //  peer id has been stored in the browser. Use it
-        this.peer = new Peer(this.id, {key: this.key, host: host, port: port});
-    } else {
-        //  No peer id cookie found. Retrieve new id from browser
-        this.peer = new Peer({key: this.key, host: host, port: port});
-    }
-
-    // initialize the connection manager
-    this.connectionManager = new MaqawConnectionManager(this.peer);
-
-    /* listen for peer js events */
-    this.peer.on('open', function (id) {
-        console.log("My id: " + id);
-        that.id = id
-        maqawCookies.setItem('peerId', id, Infinity);
-    });
-
-    this.peer.on('clients', function (visitors) {
-        console.log('visitors: ' + visitors.msg);
-        that.visitors = visitors.msg;
-        that.handleVisitorList(that.visitors);
-    });
-
-    this.peer.on('representatives', function (reps) {
-        console.log('Reps: ' + reps.msg);
-        that.representatives = reps.msg;
-    });
-
-    /*
-     * Receives an array of visitors from the Peer Server and passes
-     * the information along to VisitorList and ConnectionManager
-     */
-    this.handleVisitorList = function (visitors) {
-        that.repSession && that.repSession.visitorList.setVisitorList(visitors);
-        that.connectionManager.setVisitors(visitors);
-    };
-
-    this.screenShareClicked = function(event) {
-      event.preventDefault();  
-      event.stopPropagation();
-      
-    };
-
-    // function called the VisitorSession when the login button is clicked
-    this.loginClicked = function () {
-        // create and display a new LoginPage object if one doesn't already exist
-        if (!that.loginPage) {
-            that.loginPage = new MaqawLoginPage(that);
-        }
-        that.maqawDisplay.setHeaderContents(that.loginPage.getHeaderContents());
-        that.maqawDisplay.setBodyContents(that.loginPage.getBodyContents());
-    };
-
-
-    this.logoutClicked = function () {
-        // clear cookies and local data for the rep
-        maqawCookies.removeItem('maqawRepLoginCookie');
-        localStorage.removeItem('maqawRepSession');
-        that.showVisitorSession();
-    };
-
-    // displays the saved visitor session
-    this.showVisitorSession = function () {
-        that.maqawDisplay.setHeaderContents(that.visitorSession.getHeaderContents());
-        that.maqawDisplay.setBodyContents(that.visitorSession.getBodyContents());
-    };
-
-    // tries to load a previously saved visitor session. If no session can be found
-    // a new one is created
-    this.startVisitorSession = function () {
-        // create new visitor session
-        var visitorSession = new MaqawVisitorSession(that);
-        // try to pull previously saved session data
-        var storedSessionData = JSON.parse(localStorage.getItem('maqawVisitorSession'));
-        // if previous data was found load it into the visitorSession
-        if (storedSessionData) {
-            visitorSession.loadSessionData(storedSessionData);
-        }
-        // save the session
-        that.visitorSession = visitorSession;
-    };
-
-    // Creates and displays a new MaqawRepSession using the MaqawRepresentative object that
-    // is passed in.
-    this.startNewRepSession = function (rep) {
-        that.repSession = new MaqawRepSession(that, rep);
-
-        // if we are loading a saved session, retrieve stored data
-        if (that.loadPreviousRepSession) {
-            // attempt to reload previous rep session data
-            var storedSessionData = JSON.parse(localStorage.getItem('maqawRepSession'));
-            // if previous data was found load it into the repSession
-            if (storedSessionData) {
-                that.repSession.loadSessionData(storedSessionData);
-            }
-        }
-
-        // update the session with the current list of visitors
-        that.repSession.updateVisitorList(that.visitors);
-
-        // display the rep session
-        that.maqawDisplay.setHeaderContents(that.repSession.getHeaderContents());
-        that.maqawDisplay.setBodyContents(that.repSession.getBodyContents());
-    };
-
-    // checks for a login cookie for a rep. If one is found we attempt to reload the session
-    // return true if a rep session is successfully loaded and false otherwise
-    this.loadRepSession = function () {
-        // check for a login cookie, return false if one can't be found
-        var loginCookie = maqawCookies.getItem('maqawRepLoginCookie');
-        if (loginCookie === null) {
-            return false;
-        }
-
-        // otherwise reload the rep session
-        if (!that.loginPage) {
-            that.loginPage = new MaqawLoginPage(that);
-        }
-        that.loginPage.loginWithParams(loginCookie);
-        that.loadPreviousRepSession = true;
-        return true;
-    };
-
-    // setup an event listener for when the page is changed so that we can save the
-    // visitor session
-    function saveVisitorSession() {
-        if (typeof that.visitorSession !== 'undefined') {
-            var sessionData = that.visitorSession.getSessionData();
-            var jsonSession = JSON.stringify(sessionData);
-            localStorage.setItem('maqawVisitorSession', jsonSession);
-        }
-    }
-
-    // save the logs and details of the rep session (if there is one)
-    // in local storage so it can be reloaded on page change
-    function saveRepSession() {
-        if (typeof that.repSession !== 'undefined') {
-            var sessionData = that.repSession.getSessionData();
-            var jsonSession = JSON.stringify(sessionData);
-            console.log(jsonSession);
-            localStorage.setItem('maqawRepSession', jsonSession);
-
-        }
-    }
-
-    function saveSession() {
-        saveVisitorSession();
-        saveRepSession();
-
-    }
-
-    // Add listener to save session state on exit so it can be reloaded later.
-    window.addEventListener('unload', saveSession, false);
-}
 /*
  MaqawManager is the top level class for managing the Maqaw client
  */
