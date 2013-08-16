@@ -1,3 +1,2612 @@
+// Copyright 2011 Google Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+(function(global) {
+  "use strict";
+
+  var matchesSelector = 'matchesSelector';
+  if ('webkitMatchesSelector' in Element.prototype)
+    matchesSelector = 'webkitMatchesSelector';
+  else if ('mozMatchesSelector' in Element.prototype)
+    matchesSelector = 'mozMatchesSelector';
+
+  var MutationObserver = global.MutationObserver || global.WebKitMutationObserver || global.MozMutationObserver;
+  if (MutationObserver === undefined) {
+    console.log('MutationSummary cannot load: DOM Mutation Observers are required.');
+    console.log('https://developer.mozilla.org/en-US/docs/DOM/MutationObserver');
+    return;
+  }
+
+  // NodeMap UtilityClass. Exposed as MutationSummary.NodeMap.
+  // TODO(rafaelw): Consider using Harmony Map when available.
+
+  var ID_PROP = '__mutation_summary_node_map_id__';
+  var nextId_ = 1;
+
+  function ensureId(node) {
+    if (!node[ID_PROP]) {
+      node[ID_PROP] = nextId_++;
+      return true;
+    }
+
+    return false;
+  }
+
+  function NodeMap() {
+    this.map_ = {};
+  };
+
+  NodeMap.prototype = {
+    set: function(node, value) {
+      ensureId(node);
+      this.map_[node[ID_PROP]] = {k: node, v: value};
+    },
+    get: function(node) {
+      if (ensureId(node))
+        return;
+      var byId = this.map_[node[ID_PROP]];
+      if (byId)
+        return byId.v;
+    },
+    has: function(node) {
+      return !ensureId(node) && node[ID_PROP] in this.map_;
+    },
+    'delete': function(node) {
+      if (ensureId(node))
+        return;
+      delete this.map_[node[ID_PROP]];
+    },
+    keys: function() {
+      var nodes = [];
+      for (var id in this.map_) {
+        nodes.push(this.map_[id].k);
+      }
+      return nodes;
+    }
+  };
+
+  function hasOwnProperty(obj, propName) {
+    return Object.prototype.hasOwnProperty.call(obj, propName);
+  }
+
+  // Reachability & Matchability changeType constants.
+  var STAYED_OUT = 0;
+  var ENTERED = 1;
+  var STAYED_IN = 2;
+  var EXITED = 3;
+
+  // Sub-states of STAYED_IN
+  var REPARENTED = 4;
+  var REORDERED = 5;
+
+  /**
+   * This is no longer in use, but conceptually it still represents the policy for
+   * reporting node movement:
+   *
+   *  var reachableMatchableProduct = [
+   *  //  STAYED_OUT,  ENTERED,     STAYED_IN,   EXITED
+   *    [ STAYED_OUT,  STAYED_OUT,  STAYED_OUT,  STAYED_OUT ], // STAYED_OUT
+   *    [ STAYED_OUT,  ENTERED,     ENTERED,     STAYED_OUT ], // ENTERED
+   *    [ STAYED_OUT,  ENTERED,     STAYED_IN,   EXITED     ], // STAYED_IN
+   *    [ STAYED_OUT,  STAYED_OUT,  EXITED,      EXITED     ]  // EXITED
+   *  ];
+   */
+
+  function enteredOrExited(changeType) {
+    return changeType == ENTERED || changeType == EXITED;
+  }
+
+  var forEach = Array.prototype.forEach.call.bind(Array.prototype.forEach);
+
+  function MutationProjection(rootNode, elementFilter, calcReordered, calcOldPreviousSibling) {
+    this.rootNode = rootNode;
+    this.elementFilter = elementFilter;
+    this.calcReordered = calcReordered;
+    this.calcOldPreviousSibling = calcOldPreviousSibling;
+  }
+
+  MutationProjection.prototype = {
+
+    getChange: function(node) {
+      var change = this.changeMap.get(node);
+      if (!change) {
+        change = {
+          target: node
+        };
+        this.changeMap.set(node, change);
+      }
+
+      if (node.nodeType == Node.ELEMENT_NODE)
+        change.matchCaseInsensitive = node instanceof HTMLElement && node.ownerDocument instanceof HTMLDocument;
+
+      return change;
+    },
+
+    getParentChange: function(node) {
+      var change = this.getChange(node);
+      if (!change.childList) {
+        change.childList = true;
+        change.oldParentNode = null;
+      }
+
+      return change;
+    },
+
+    handleChildList: function(mutation) {
+      this.childListChanges = true;
+
+      forEach(mutation.removedNodes, function(el) {
+        var change = this.getParentChange(el);
+
+        // Note: is it possible to receive a removal followed by a removal. This
+        // can occur if the removed node is added to an non-observed node, that
+        // node is added to the observed area, and then the node removed from
+        // it.
+        if (change.added || change.oldParentNode)
+          change.added = false;
+        else
+          change.oldParentNode = mutation.target;
+      }, this);
+
+      forEach(mutation.addedNodes, function(el) {
+        var change = this.getParentChange(el);
+        change.added = true;
+      }, this);
+    },
+
+    handleAttributes: function(mutation) {
+      this.attributesChanges = true;
+
+      var change = this.getChange(mutation.target);
+      if (!change.attributes) {
+        change.attributes = true;
+        change.attributeOldValues = {};
+      }
+
+      var oldValues = change.attributeOldValues;
+      if (!hasOwnProperty(oldValues, mutation.attributeName)) {
+        oldValues[mutation.attributeName] = mutation.oldValue;
+      }
+    },
+
+    handleCharacterData: function(mutation) {
+      this.characterDataChanges = true;
+
+      var change = this.getChange(mutation.target);
+      if (change.characterData)
+        return;
+      change.characterData = true;
+      change.characterDataOldValue = mutation.oldValue;
+    },
+
+    processMutations: function(mutations) {
+      this.mutations = mutations;
+      this.changeMap = new NodeMap;
+
+      this.mutations.forEach(function(mutation) {
+        switch (mutation.type) {
+          case 'childList':
+            this.handleChildList(mutation);
+            break;
+          case 'attributes':
+            this.handleAttributes(mutation);
+            break;
+          case 'characterData':
+            this.handleCharacterData(mutation);
+            break;
+        }
+      }, this);
+
+      // Calculate node movement.
+      var entered = this.entered = [];
+      var exited = this.exited = [];
+      var stayedIn = this.stayedIn = new NodeMap;
+
+      if (!this.childListChanges && !this.attributesChanges)
+        return; // No childList or attributes mutations occurred.
+
+      var matchabilityChange = this.matchabilityChange.bind(this);
+
+      var reachabilityChange = this.reachabilityChange.bind(this);
+      var wasReordered = this.wasReordered.bind(this);
+
+      var visited = new NodeMap;
+      var self = this;
+
+      function ensureHasOldPreviousSiblingIfNeeded(node) {
+        if (!self.calcOldPreviousSibling)
+          return;
+
+        self.processChildlistChanges();
+
+        var parentNode = node.parentNode;
+        var change = self.changeMap.get(node);
+        if (change && change.oldParentNode)
+          parentNode = change.oldParentNode;
+
+        change = self.childlistChanges.get(parentNode);
+        if (!change) {
+          change = {
+            oldPrevious: new NodeMap
+          };
+
+          self.childlistChanges.set(parentNode, change);
+        }
+
+        if (!change.oldPrevious.has(node)) {
+          change.oldPrevious.set(node, node.previousSibling);
+        }
+      }
+
+      function visitNode(node, parentReachable) {
+        if (visited.has(node))
+          return;
+        visited.set(node, true);
+
+        var change = self.changeMap.get(node);
+        var reachable = parentReachable;
+
+        // node inherits its parent's reachability change unless
+        // its parentNode was mutated.
+        if ((change && change.childList) || reachable == undefined)
+          reachable = reachabilityChange(node);
+
+        if (reachable == STAYED_OUT)
+          return;
+
+        // Cache match results for sub-patterns.
+        matchabilityChange(node);
+
+        if (reachable == ENTERED) {
+          entered.push(node);
+        } else if (reachable == EXITED) {
+          exited.push(node);
+          ensureHasOldPreviousSiblingIfNeeded(node);
+
+        } else if (reachable == STAYED_IN) {
+          var movement = STAYED_IN;
+
+          if (change && change.childList) {
+            if (change.oldParentNode !== node.parentNode) {
+              movement = REPARENTED;
+              ensureHasOldPreviousSiblingIfNeeded(node);
+            } else if (self.calcReordered && wasReordered(node)) {
+              movement = REORDERED;
+            }
+          }
+
+          stayedIn.set(node, movement);
+        }
+
+        if (reachable == STAYED_IN)
+          return;
+
+        // reachable == ENTERED || reachable == EXITED.
+        for (var child = node.firstChild; child; child = child.nextSibling) {
+          visitNode(child, reachable);
+        }
+      }
+
+      this.changeMap.keys().forEach(function(node) {
+        visitNode(node);
+      });
+    },
+
+    getChanged: function(summary) {
+      var matchabilityChange = this.matchabilityChange.bind(this);
+
+      this.entered.forEach(function(node) {
+        var matchable = matchabilityChange(node);
+        if (matchable == ENTERED || matchable == STAYED_IN)
+          summary.added.push(node);
+      });
+
+      this.stayedIn.keys().forEach(function(node) {
+        var matchable = matchabilityChange(node);
+
+        if (matchable == ENTERED) {
+          summary.added.push(node);
+        } else if (matchable == EXITED) {
+          summary.removed.push(node);
+        } else if (matchable == STAYED_IN && (summary.reparented || summary.reordered)) {
+          var movement = this.stayedIn.get(node);
+          if (summary.reparented && movement == REPARENTED)
+            summary.reparented.push(node);
+          else if (summary.reordered && movement == REORDERED)
+            summary.reordered.push(node);
+        }
+      }, this);
+
+      this.exited.forEach(function(node) {
+        var matchable = matchabilityChange(node);
+        if (matchable == EXITED || matchable == STAYED_IN)
+          summary.removed.push(node);
+      })
+    },
+
+    getOldParentNode: function(node) {
+      var change = this.changeMap.get(node);
+      if (change && change.childList)
+        return change.oldParentNode ? change.oldParentNode : null;
+
+      var reachabilityChange = this.reachabilityChange(node);
+      if (reachabilityChange == STAYED_OUT || reachabilityChange == ENTERED)
+        throw Error('getOldParentNode requested on invalid node.');
+
+      return node.parentNode;
+    },
+
+    getOldPreviousSibling: function(node) {
+      var parentNode = node.parentNode;
+      var change = this.changeMap.get(node);
+      if (change && change.oldParentNode)
+        parentNode = change.oldParentNode;
+
+      change = this.childlistChanges.get(parentNode);
+      if (!change)
+        throw Error('getOldPreviousSibling requested on invalid node.');
+
+      return change.oldPrevious.get(node);
+    },
+
+    getOldAttribute: function(element, attrName) {
+      var change = this.changeMap.get(element);
+      if (!change || !change.attributes)
+        throw Error('getOldAttribute requested on invalid node.');
+
+      if (change.matchCaseInsensitive)
+        attrName = attrName.toLowerCase();
+
+      if (!hasOwnProperty(change.attributeOldValues, attrName))
+        throw Error('getOldAttribute requested for unchanged attribute name.');
+
+      return change.attributeOldValues[attrName];
+    },
+
+    getAttributesChanged: function(postFilter) {
+      if (!this.attributesChanges)
+        return {}; // No attributes mutations occurred.
+
+      var attributeFilter;
+      var caseInsensitiveFilter;
+      if (postFilter) {
+        attributeFilter = {};
+        caseInsensitiveFilter = {};
+        postFilter.forEach(function(attrName) {
+          attributeFilter[attrName] = true;
+          var lowerAttrName = attrName.toLowerCase();
+          if (attrName != lowerAttrName) {
+            caseInsensitiveFilter[lowerAttrName] = attrName;
+          }
+        });
+      }
+
+      var result = {};
+
+      var nodes = this.changeMap.keys();
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+
+        var change = this.changeMap.get(node);
+        if (!change.attributes)
+          continue;
+
+        if (STAYED_IN != this.reachabilityChange(node) || STAYED_IN != this.matchabilityChange(node))
+          continue;
+
+        var element = node;
+        var oldValues = change.attributeOldValues;
+
+        Object.keys(oldValues).forEach(function(name) {
+          var localName = name;
+          if (change.matchCaseInsensitive && caseInsensitiveFilter && caseInsensitiveFilter[name])
+            localName = caseInsensitiveFilter[name];
+
+          if (attributeFilter && !attributeFilter[localName])
+            return;
+
+          if (element.getAttribute(name) == oldValues[name])
+            return;
+
+          if (!result[localName])
+            result[localName] = [];
+
+          result[localName].push(element);
+        });
+      }
+
+      return result;
+    },
+
+    getOldCharacterData: function(node) {
+      var change = this.changeMap.get(node);
+      if (!change || !change.characterData)
+        throw Error('getOldCharacterData requested on invalid node.');
+
+      return change.characterDataOldValue;
+    },
+
+    getCharacterDataChanged: function() {
+      if (!this.characterDataChanges)
+        return []; // No characterData mutations occurred.
+
+      var nodes = this.changeMap.keys();
+      var result = [];
+      for (var i = 0; i < nodes.length; i++) {
+        var target = nodes[i];
+        if (STAYED_IN != this.reachabilityChange(target) || STAYED_IN != this.matchabilityChange(target))
+          continue;
+
+        var change = this.changeMap.get(target);
+        if (!change.characterData ||
+            target.textContent == change.characterDataOldValue)
+          continue
+
+        result.push(target);
+      }
+
+      return result;
+    },
+
+    /**
+     * Returns whether a given node:
+     *
+     *    STAYED_OUT, ENTERED, STAYED_IN or EXITED
+     *
+     * the set of nodes reachable from the root.
+     *
+     * These four states are the permutations of whether the node
+     *
+     *   wasReachable(node)
+     *   isReachable(node)
+     *
+     */
+    reachabilityChange: function(node) {
+      this.reachableCache = this.reachableCache || new NodeMap;
+      this.wasReachableCache = this.wasReachableCache || new NodeMap;
+
+      // Close over owned values.
+      var rootNode = this.rootNode;
+      var changeMap = this.changeMap;
+      var reachableCache = this.reachableCache;
+      var wasReachableCache = this.wasReachableCache;
+
+      // An node's oldParent is
+      //   -its present parent, if nothing happened to it
+      //   -null if the first thing that happened to it was an add.
+      //   -the node it was removed from if the first thing that happened to it
+      //      was a remove.
+      function getOldParent(node) {
+        var change = changeMap.get(node);
+
+        if (change && change.childList) {
+          if (change.oldParentNode)
+            return change.oldParentNode;
+          if (change.added)
+            return null;
+        }
+
+        return node.parentNode;
+      }
+
+      // Is the given node reachable from the rootNode.
+      function getIsReachable(node) {
+        if (node === rootNode)
+          return true;
+        if (!node)
+          return false;
+
+        var isReachable = reachableCache.get(node);
+        if (isReachable === undefined) {
+          isReachable = getIsReachable(node.parentNode);
+          reachableCache.set(node, isReachable);
+        }
+        return isReachable;
+      }
+
+      // Was the given node reachable from the rootNode.
+      // A node wasReachable if its oldParent wasReachable.
+      function getWasReachable(node) {
+        if (node === rootNode)
+          return true;
+        if (!node)
+          return false;
+
+        var wasReachable = wasReachableCache.get(node);
+        if (wasReachable === undefined) {
+          wasReachable = getWasReachable(getOldParent(node));
+          wasReachableCache.set(node, wasReachable);
+        }
+        return wasReachable;
+      }
+
+      if (getIsReachable(node))
+        return getWasReachable(node) ? STAYED_IN : ENTERED;
+      else
+        return getWasReachable(node) ? EXITED : STAYED_OUT;
+    },
+
+    checkWasMatching: function(el, filter, isMatching) {
+      var change = this.changeMap.get(el);
+      if (!change || !change.attributeOldValues)
+        return isMatching;
+
+      var tagName = filter.tagName;
+      if (change.matchCaseInsensitive &&
+          tagName != '*' &&
+          hasOwnProperty(filter, 'caseInsensitiveTagName')) {
+        tagName = filter.caseInsensitiveTagName;
+      }
+
+      if (tagName != '*' && tagName != el.tagName)
+        return false;
+
+      var attributeOldValues = change.attributeOldValues;
+      var significantAttrChanged = filter.qualifiers.some(function(qualifier) {
+        if (qualifier.class)
+          return hasOwnProperty(attributeOldValues, 'class');
+        else if (qualifier.id)
+          return hasOwnProperty(attributeOldValues, 'id');
+        else {
+          return change.matchCaseInsensitive && hasOwnProperty(qualifier, 'caseInsensitiveAttrName') ?
+              hasOwnProperty(attributeOldValues, qualifier.caseInsensitiveAttrName) :
+              hasOwnProperty(attributeOldValues, qualifier.attrName)
+        }
+      });
+
+      if (!significantAttrChanged)
+        return isMatching;
+
+      for (var i = 0; i < filter.qualifiers.length; i++) {
+        var qualifier = filter.qualifiers[i];
+        var attrName;
+        if (qualifier.class)
+          attrName = 'class';
+        else if (qualifier.id)
+          attrName = 'id';
+        else {
+          if (change.matchCaseInsensitive &&
+              hasOwnProperty(qualifier, 'caseInsensitiveAttrName')) {
+            attrName = qualifier.caseInsensitiveAttrName;
+          } else {
+            attrName = qualifier.attrName;
+          }
+        }
+
+        var contains = qualifier.class ? true : qualifier.contains;
+
+        var attrOldValue = hasOwnProperty(attributeOldValues, attrName) ?
+            attributeOldValues[attrName] : el.getAttribute(attrName);
+
+        if (attrOldValue == null)
+          return false;
+
+        if (qualifier.hasOwnProperty('attrValue')) {
+          if (!contains && qualifier.attrValue !== attrOldValue)
+            return false;
+
+          var subvalueMatch = attrOldValue.split(' ').some(function(subValue) {
+            return subValue == qualifier.attrValue;
+          });
+
+          if (!subvalueMatch)
+            return false;
+        }
+      }
+
+      return true;
+    },
+
+    /**
+     * Returns whether a given element:
+     *
+     *   STAYED_OUT, ENTERED, EXITED or STAYED_IN
+     *
+     * the set of element which match at least one match pattern.
+     *
+     * These four states are the permutations of whether the element
+     *
+     *   wasMatching(node)
+     *   isMatching(node)
+     *
+     */
+    matchabilityChange: function(node) {
+      // TODO(rafaelw): Include PI, CDATA?
+      // Only include text nodes.
+      if (this.filterCharacterData) {
+        switch (node.nodeType) {
+          case Node.COMMENT_NODE:
+          case Node.TEXT_NODE:
+            return STAYED_IN;
+          default:
+            return STAYED_OUT;
+        }
+      }
+
+      // No element filter. Include all nodes.
+      if (!this.elementFilter)
+        return STAYED_IN;
+
+      // Element filter. Exclude non-elements.
+      if (node.nodeType !== Node.ELEMENT_NODE)
+        return STAYED_OUT;
+
+      var el = node;
+
+      function computeMatchabilityChange(filter) {
+        if (!this.matchCache)
+          this.matchCache = {};
+        if (!this.matchCache[filter.selectorString])
+          this.matchCache[filter.selectorString] = new NodeMap;
+
+        var cache = this.matchCache[filter.selectorString];
+        var result = cache.get(el);
+        if (result !== undefined)
+          return result;
+
+        var isMatching = el[matchesSelector](filter.selectorString);
+        var wasMatching = this.checkWasMatching(el, filter, isMatching);
+
+        if (isMatching)
+          result = wasMatching ? STAYED_IN : ENTERED;
+        else
+          result = wasMatching ? EXITED : STAYED_OUT;
+
+        cache.set(el, result);
+        return result;
+      }
+
+      var matchChanges = this.elementFilter.map(computeMatchabilityChange, this);
+      var accum = STAYED_OUT;
+      var i = 0;
+
+      while (accum != STAYED_IN && i < matchChanges.length) {
+        switch(matchChanges[i]) {
+          case STAYED_IN:
+            accum = STAYED_IN;
+            break;
+          case ENTERED:
+            if (accum == EXITED)
+              accum = STAYED_IN;
+            else
+              accum = ENTERED;
+            break;
+          case EXITED:
+            if (accum == ENTERED)
+              accum = STAYED_IN;
+            else
+              accum = EXITED;
+            break;
+        }
+
+        i++;
+      }
+
+      return accum;
+    },
+
+    processChildlistChanges: function() {
+      if (this.childlistChanges)
+        return;
+
+      var childlistChanges = this.childlistChanges = new NodeMap;
+
+      function getChildlistChange(el) {
+        var change = childlistChanges.get(el);
+        if (!change) {
+          change = {
+            added: new NodeMap,
+            removed: new NodeMap,
+            maybeMoved: new NodeMap,
+            oldPrevious: new NodeMap
+          };
+          childlistChanges.set(el, change);
+        }
+
+        return change;
+      }
+
+      var reachabilityChange = this.reachabilityChange.bind(this);
+      var self = this;
+
+      this.mutations.forEach(function(mutation) {
+        if (mutation.type != 'childList')
+          return;
+
+        if (reachabilityChange(mutation.target) != STAYED_IN && !self.calcOldPreviousSibling)
+          return;
+
+        var change = getChildlistChange(mutation.target);
+
+        var oldPrevious = mutation.previousSibling;
+
+        function recordOldPrevious(node, previous) {
+          if (!node ||
+              change.oldPrevious.has(node) ||
+              change.added.has(node) ||
+              change.maybeMoved.has(node))
+            return;
+
+          if (previous &&
+              (change.added.has(previous) ||
+               change.maybeMoved.has(previous)))
+            return;
+
+          change.oldPrevious.set(node, previous);
+        }
+
+        forEach(mutation.removedNodes, function(node) {
+          recordOldPrevious(node, oldPrevious);
+
+          if (change.added.has(node)) {
+            change.added.delete(node);
+          } else {
+            change.removed.set(node, true);
+            change.maybeMoved.delete(node, true);
+          }
+
+          oldPrevious = node;
+        });
+
+        recordOldPrevious(mutation.nextSibling, oldPrevious);
+
+        forEach(mutation.addedNodes, function(node) {
+          if (change.removed.has(node)) {
+            change.removed.delete(node);
+            change.maybeMoved.set(node, true);
+          } else {
+            change.added.set(node, true);
+          }
+        });
+      });
+    },
+
+    wasReordered: function(node) {
+      if (!this.childListChanges)
+        return false;
+
+      this.processChildlistChanges();
+
+      var parentNode = node.parentNode;
+      var change = this.changeMap.get(node);
+      if (change && change.oldParentNode)
+        parentNode = change.oldParentNode;
+
+      change = this.childlistChanges.get(parentNode);
+      if (!change)
+        return false;
+
+      if (change.moved)
+        return change.moved.get(node);
+
+      var moved = change.moved = new NodeMap;
+      var pendingMoveDecision = new NodeMap;
+
+      function isMoved(node) {
+        if (!node)
+          return false;
+        if (!change.maybeMoved.has(node))
+          return false;
+
+        var didMove = moved.get(node);
+        if (didMove !== undefined)
+          return didMove;
+
+        if (pendingMoveDecision.has(node)) {
+          didMove = true;
+        } else {
+          pendingMoveDecision.set(node, true);
+          didMove = getPrevious(node) !== getOldPrevious(node);
+        }
+
+        if (pendingMoveDecision.has(node)) {
+          pendingMoveDecision.delete(node);
+          moved.set(node, didMove);
+        } else {
+          didMove = moved.get(node);
+        }
+
+        return didMove;
+      }
+
+      var oldPreviousCache = new NodeMap;
+      function getOldPrevious(node) {
+        var oldPrevious = oldPreviousCache.get(node);
+        if (oldPrevious !== undefined)
+          return oldPrevious;
+
+        oldPrevious = change.oldPrevious.get(node);
+        while (oldPrevious &&
+               (change.removed.has(oldPrevious) || isMoved(oldPrevious))) {
+          oldPrevious = getOldPrevious(oldPrevious);
+        }
+
+        if (oldPrevious === undefined)
+          oldPrevious = node.previousSibling;
+        oldPreviousCache.set(node, oldPrevious);
+
+        return oldPrevious;
+      }
+
+      var previousCache = new NodeMap;
+      function getPrevious(node) {
+        if (previousCache.has(node))
+          return previousCache.get(node);
+
+        var previous = node.previousSibling;
+        while (previous && (change.added.has(previous) || isMoved(previous)))
+          previous = previous.previousSibling;
+
+        previousCache.set(node, previous);
+        return previous;
+      }
+
+      change.maybeMoved.keys().forEach(isMoved);
+      return change.moved.get(node);
+    }
+  }
+
+  // TODO(rafaelw): Allow ':' and '.' as valid name characters.
+  var validNameInitialChar = /[a-zA-Z_]+/;
+  var validNameNonInitialChar = /[a-zA-Z0-9_\-]+/;
+
+  // TODO(rafaelw): Consider allowing backslash in the attrValue.
+  // TODO(rafaelw): There's got a to be way to represent this state machine
+  // more compactly???
+  function parseElementFilter(elementFilter) {
+    var selectorGroup = [];
+    var currentSelector;
+    var currentQualifier;
+
+    function newSelector() {
+      if (currentSelector) {
+        if (currentQualifier) {
+          currentSelector.qualifiers.push(currentQualifier);
+          currentQualifier = undefined;
+        }
+
+        selectorGroup.push(currentSelector);
+      }
+      currentSelector = {
+        qualifiers: []
+      }
+    }
+
+    function newQualifier() {
+      if (currentQualifier)
+        currentSelector.qualifiers.push(currentQualifier);
+
+      currentQualifier = {};
+    }
+
+
+    var WHITESPACE = /\s/;
+    var valueQuoteChar;
+    var SYNTAX_ERROR = 'Invalid or unsupported selector syntax.';
+
+    var SELECTOR = 1;
+    var TAG_NAME = 2;
+    var QUALIFIER = 3;
+    var QUALIFIER_NAME_FIRST_CHAR = 4;
+    var QUALIFIER_NAME = 5;
+    var ATTR_NAME_FIRST_CHAR = 6;
+    var ATTR_NAME = 7;
+    var EQUIV_OR_ATTR_QUAL_END = 8;
+    var EQUAL = 9;
+    var ATTR_QUAL_END = 10;
+    var VALUE_FIRST_CHAR = 11;
+    var VALUE = 12;
+    var QUOTED_VALUE = 13;
+    var SELECTOR_SEPARATOR = 14;
+
+    var state = SELECTOR;
+    var i = 0;
+    while (i < elementFilter.length) {
+      var c = elementFilter[i++];
+
+      switch (state) {
+        case SELECTOR:
+          if (c.match(validNameInitialChar)) {
+            newSelector();
+            currentSelector.tagName = c;
+            state = TAG_NAME;
+            break;
+          }
+
+          if (c == '*') {
+            newSelector();
+            currentSelector.tagName = '*';
+            state = QUALIFIER;
+            break;
+          }
+
+          if (c == '.') {
+            newSelector();
+            newQualifier();
+            currentSelector.tagName = '*';
+            currentQualifier.class = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '#') {
+            newSelector();
+            newQualifier();
+            currentSelector.tagName = '*';
+            currentQualifier.id = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '[') {
+            newSelector();
+            newQualifier();
+            currentSelector.tagName = '*';
+            currentQualifier.attrName = '';
+            state = ATTR_NAME_FIRST_CHAR;
+            break;
+          }
+
+          if (c.match(WHITESPACE))
+            break;
+
+          throw Error(SYNTAX_ERROR);
+
+        case TAG_NAME:
+          if (c.match(validNameNonInitialChar)) {
+            currentSelector.tagName += c;
+            break;
+          }
+
+          if (c == '.') {
+            newQualifier();
+            currentQualifier.class = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '#') {
+            newQualifier();
+            currentQualifier.id = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '[') {
+            newQualifier();
+            currentQualifier.attrName = '';
+            state = ATTR_NAME_FIRST_CHAR;
+            break;
+          }
+
+          if (c.match(WHITESPACE)) {
+            state = SELECTOR_SEPARATOR;
+            break;
+          }
+
+          if (c == ',') {
+            state = SELECTOR;
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case QUALIFIER:
+          if (c == '.') {
+            newQualifier();
+            currentQualifier.class = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '#') {
+            newQualifier();
+            currentQualifier.id = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '[') {
+            newQualifier();
+            currentQualifier.attrName = '';
+            state = ATTR_NAME_FIRST_CHAR;
+            break;
+          }
+
+          if (c.match(WHITESPACE)) {
+            state = SELECTOR_SEPARATOR;
+            break;
+          }
+
+          if (c == ',') {
+            state = SELECTOR;
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case QUALIFIER_NAME_FIRST_CHAR:
+          if (c.match(validNameInitialChar)) {
+            currentQualifier.attrValue = c;
+            state = QUALIFIER_NAME;
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case QUALIFIER_NAME:
+          if (c.match(validNameNonInitialChar)) {
+            currentQualifier.attrValue += c;
+            break;
+          }
+
+          if (c == '.') {
+            newQualifier();
+            currentQualifier.class = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '#') {
+            newQualifier();
+            currentQualifier.id = true;
+            state = QUALIFIER_NAME_FIRST_CHAR;
+            break;
+          }
+          if (c == '[') {
+            newQualifier();
+            state = ATTR_NAME_FIRST_CHAR;
+            break;
+          }
+
+          if (c.match(WHITESPACE)) {
+            state = SELECTOR_SEPARATOR;
+            break;
+          }
+          if (c == ',') {
+            state = SELECTOR;
+            break
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case ATTR_NAME_FIRST_CHAR:
+          if (c.match(validNameInitialChar)) {
+            currentQualifier.attrName = c;
+            state = ATTR_NAME;
+            break;
+          }
+
+          if (c.match(WHITESPACE))
+            break;
+
+          throw Error(SYNTAX_ERROR);
+
+        case ATTR_NAME:
+          if (c.match(validNameNonInitialChar)) {
+            currentQualifier.attrName += c;
+            break;
+          }
+
+          if (c.match(WHITESPACE)) {
+            state = EQUIV_OR_ATTR_QUAL_END;
+            break;
+          }
+
+          if (c == '~') {
+            currentQualifier.contains = true;
+            state = EQUAL;
+            break;
+          }
+
+          if (c == '=') {
+            currentQualifier.attrValue = '';
+            state = VALUE_FIRST_CHAR;
+            break;
+          }
+
+          if (c == ']') {
+            state = QUALIFIER;
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case EQUIV_OR_ATTR_QUAL_END:
+          if (c == '~') {
+            currentQualifier.contains = true;
+            state = EQUAL;
+            break;
+          }
+
+          if (c == '=') {
+            currentQualifier.attrValue = '';
+            state = VALUE_FIRST_CHAR;
+            break;
+          }
+
+          if (c == ']') {
+            state = QUALIFIER;
+            break;
+          }
+
+          if (c.match(WHITESPACE))
+            break;
+
+          throw Error(SYNTAX_ERROR);
+
+        case EQUAL:
+          if (c == '=') {
+            currentQualifier.attrValue = '';
+            state = VALUE_FIRST_CHAR
+            break;
+          }
+
+          throw Error(SYNTAX_ERROR);
+
+        case ATTR_QUAL_END:
+          if (c == ']') {
+            state = QUALIFIER;
+            break;
+          }
+
+          if (c.match(WHITESPACE))
+            break;
+
+          throw Error(SYNTAX_ERROR);
+
+        case VALUE_FIRST_CHAR:
+          if (c.match(WHITESPACE))
+            break;
+
+          if (c == '"' || c == "'") {
+            valueQuoteChar = c;
+            state = QUOTED_VALUE;
+            break;
+          }
+
+          currentQualifier.attrValue += c;
+          state = VALUE;
+          break;
+
+        case VALUE:
+          if (c.match(WHITESPACE)) {
+            state = ATTR_QUAL_END;
+            break;
+          }
+          if (c == ']') {
+            state = QUALIFIER;
+            break;
+          }
+          if (c == "'" || c == '"')
+            throw Error(SYNTAX_ERROR);
+
+          currentQualifier.attrValue += c;
+          break;
+
+        case QUOTED_VALUE:
+          if (c == valueQuoteChar) {
+            state = ATTR_QUAL_END;
+            break;
+          }
+
+          currentQualifier.attrValue += c;
+          break;
+
+        case SELECTOR_SEPARATOR:
+          if (c.match(WHITESPACE))
+            break;
+
+          if (c == ',') {
+            state = SELECTOR;
+            break
+          }
+
+          throw Error(SYNTAX_ERROR);
+      }
+    }
+
+    switch (state) {
+      case SELECTOR:
+      case TAG_NAME:
+      case QUALIFIER:
+      case QUALIFIER_NAME:
+      case SELECTOR_SEPARATOR:
+        // Valid end states.
+        newSelector();
+        break;
+      default:
+        throw Error(SYNTAX_ERROR);
+    }
+
+    if (!selectorGroup.length)
+      throw Error(SYNTAX_ERROR);
+
+    function escapeQuotes(value) {
+      return '"' + value.replace(/"/, '\\\"') + '"';
+    }
+
+    selectorGroup.forEach(function(selector) {
+      var caseInsensitiveTagName = selector.tagName.toUpperCase();
+      if (selector.tagName != caseInsensitiveTagName)
+        selector.caseInsensitiveTagName = caseInsensitiveTagName;
+
+      var selectorString = selector.tagName;
+
+      selector.qualifiers.forEach(function(qualifier) {
+        if (qualifier.class)
+          selectorString += '.' + qualifier.attrValue;
+        else if (qualifier.id)
+          selectorString += '#' + qualifier.attrValue;
+        else {
+          var caseInsensitiveAttrName = qualifier.attrName.toLowerCase();
+          if (qualifier.attrName != caseInsensitiveAttrName)
+            qualifier.caseInsensitiveAttrName = caseInsensitiveAttrName;
+
+          if (qualifier.contains)
+            selectorString += '[' + qualifier.attrName + '~=' + escapeQuotes(qualifier.attrValue) + ']';
+          else {
+            selectorString += '[' + qualifier.attrName;
+            if (qualifier.hasOwnProperty('attrValue'))
+              selectorString += '=' + escapeQuotes(qualifier.attrValue);
+            selectorString += ']';
+          }
+        }
+      });
+
+      selector.selectorString = selectorString;
+    });
+
+    return selectorGroup;
+  }
+
+  var attributeFilterPattern = /^([a-zA-Z:_]+[a-zA-Z0-9_\-:\.]*)$/;
+
+  function validateAttribute(attribute) {
+    if (typeof attribute != 'string')
+      throw Error('Invalid request opion. attribute must be a non-zero length string.');
+
+    attribute = attribute.trim();
+
+    if (!attribute)
+      throw Error('Invalid request opion. attribute must be a non-zero length string.');
+
+
+    if (!attribute.match(attributeFilterPattern))
+      throw Error('Invalid request option. invalid attribute name: ' + attribute);
+
+    return attribute;
+  }
+
+  function validateElementAttributes(attribs) {
+    if (!attribs.trim().length)
+      throw Error('Invalid request option: elementAttributes must contain at least one attribute.');
+
+    var lowerAttributes = {};
+    var attributes = {};
+
+    var tokens = attribs.split(/\s+/);
+    for (var i = 0; i < tokens.length; i++) {
+      var attribute = tokens[i];
+      if (!attribute)
+        continue;
+
+      var attribute = validateAttribute(attribute);
+      if (lowerAttributes.hasOwnProperty(attribute.toLowerCase()))
+        throw Error('Invalid request option: observing multiple case varitations of the same attribute is not supported.');
+      attributes[attribute] = true;
+      lowerAttributes[attribute.toLowerCase()] = true;
+    }
+
+    return Object.keys(attributes);
+  }
+
+  function validateOptions(options) {
+    var validOptions = {
+      'callback': true, // required
+      'queries': true,  // required
+      'rootNode': true,
+      'oldPreviousSibling': true,
+      'observeOwnChanges': true
+    };
+
+    var opts = {};
+
+    for (var opt in options) {
+      if (!(opt in validOptions))
+        throw Error('Invalid option: ' + opt);
+    }
+
+    if (typeof options.callback !== 'function')
+      throw Error('Invalid options: callback is required and must be a function');
+
+    opts.callback = options.callback;
+    opts.rootNode = options.rootNode || document;
+    opts.observeOwnChanges = options.observeOwnChanges;
+    opts.oldPreviousSibling = options.oldPreviousSibling;
+
+    if (!options.queries || !options.queries.length)
+      throw Error('Invalid options: queries must contain at least one query request object.');
+
+    opts.queries = [];
+
+    for (var i = 0; i < options.queries.length; i++) {
+      var request = options.queries[i];
+
+      // all
+      if (request.all) {
+        if (Object.keys(request).length > 1)
+          throw Error('Invalid request option. all has no options.');
+
+        opts.queries.push({all: true});
+        continue;
+      }
+
+      // attribute
+      if (request.hasOwnProperty('attribute')) {
+        var query = {
+          attribute: validateAttribute(request.attribute)
+        };
+
+        query.elementFilter = parseElementFilter('*[' + query.attribute + ']');
+
+        if (Object.keys(request).length > 1)
+          throw Error('Invalid request option. attribute has no options.');
+
+        opts.queries.push(query);
+        continue;
+      }
+
+      // element
+      if (request.hasOwnProperty('element')) {
+        var requestOptionCount = Object.keys(request).length;
+        var query = {
+          element: request.element,
+          elementFilter: parseElementFilter(request.element)
+        };
+
+        if (request.hasOwnProperty('elementAttributes')) {
+          query.elementAttributes = validateElementAttributes(request.elementAttributes);
+          requestOptionCount--;
+        }
+
+        if (requestOptionCount > 1)
+          throw Error('Invalid request option. element only allows elementAttributes option.');
+
+        opts.queries.push(query);
+        continue;
+      }
+
+      // characterData
+      if (request.characterData) {
+        if (Object.keys(request).length > 1)
+          throw Error('Invalid request option. characterData has no options.');
+
+        opts.queries.push({ characterData: true });
+        continue;
+      }
+
+      throw Error('Invalid request option. Unknown query request.');
+    }
+
+    return opts;
+  }
+
+  function elementFilterAttributes(filters) {
+    var attributes = {};
+
+    filters.forEach(function(filter) {
+      filter.qualifiers.forEach(function(qualifier) {
+        if (qualifier.class)
+          attributes['class'] = true;
+        else if (qualifier.id)
+          attributes['id'] = true;
+        else
+          attributes[qualifier.attrName] = true;
+      });
+    });
+
+    return Object.keys(attributes);
+  }
+
+  function createObserverOptions(queries) {
+    var observerOptions = {
+      childList: true,
+      subtree: true
+    };
+
+    var attributeFilter;
+    function observeAttributes(attributes) {
+      if (observerOptions.attributes && !attributeFilter)
+        return; // already observing all.
+
+      observerOptions.attributes = true;
+      observerOptions.attributeOldValue = true;
+
+      if (!attributes) {
+        // observe all.
+        attributeFilter = undefined;
+        return;
+      }
+
+      // add to observed.
+      attributeFilter = attributeFilter || {};
+      attributes.forEach(function(attribute) {
+        attributeFilter[attribute] = true;
+        attributeFilter[attribute.toLowerCase()] = true;
+      });
+    }
+
+    queries.forEach(function(request) {
+      if (request.characterData) {
+        observerOptions.characterData = true;
+        observerOptions.characterDataOldValue = true;
+        return;
+      }
+
+      if (request.all) {
+        observeAttributes();
+        observerOptions.characterData = true;
+        observerOptions.characterDataOldValue = true;
+        return;
+      }
+
+      if (request.attribute) {
+        observeAttributes([request.attribute.trim()]);
+        return;
+      }
+
+      if (request.elementFilter && request.elementFilter.some(function(f) { return f.className; } ))
+         observeAttributes(['class']);
+
+      var attributes = elementFilterAttributes(request.elementFilter).concat(request.elementAttributes || []);
+      if (attributes.length)
+        observeAttributes(attributes);
+    });
+
+    if (attributeFilter)
+      observerOptions.attributeFilter = Object.keys(attributeFilter);
+
+    return observerOptions;
+  }
+
+  function createSummary(projection, root, query) {
+    projection.elementFilter = query.elementFilter;
+    projection.filterCharacterData = query.characterData;
+
+    var summary = {
+      target: root,
+      type: 'summary',
+      added: [],
+      removed: []
+    };
+
+    summary.getOldParentNode = projection.getOldParentNode.bind(projection);
+
+    if (query.all || query.element)
+      summary.reparented = [];
+
+    if (query.all)
+      summary.reordered = [];
+
+    projection.getChanged(summary);
+
+    if (query.all || query.attribute || query.elementAttributes) {
+      var filter = query.attribute ? [ query.attribute ] : query.elementAttributes;
+      var attributeChanged = projection.getAttributesChanged(filter);
+
+      if (query.attribute) {
+        summary.valueChanged = [];
+        if (attributeChanged[query.attribute])
+          summary.valueChanged = attributeChanged[query.attribute];
+
+        summary.getOldAttribute = function(node) {
+          return projection.getOldAttribute(node, query.attribute);
+        }
+      } else {
+        summary.attributeChanged = attributeChanged;
+        if (query.elementAttributes) {
+          query.elementAttributes.forEach(function(attrName) {
+            if (!summary.attributeChanged.hasOwnProperty(attrName))
+              summary.attributeChanged[attrName] = [];
+          });
+        }
+        summary.getOldAttribute = projection.getOldAttribute.bind(projection);
+      }
+    }
+
+    if (query.all || query.characterData) {
+      var characterDataChanged = projection.getCharacterDataChanged()
+      summary.getOldCharacterData = projection.getOldCharacterData.bind(projection);
+
+      if (query.characterData)
+        summary.valueChanged = characterDataChanged;
+      else
+        summary.characterDataChanged = characterDataChanged;
+    }
+
+    if (summary.reordered)
+      summary.getOldPreviousSibling = projection.getOldPreviousSibling.bind(projection);
+
+    return summary;
+  }
+
+  function MutationSummary(opts) {
+    var connected = false;
+    var options = validateOptions(opts);
+    var observerOptions = createObserverOptions(options.queries);
+
+    var root = options.rootNode;
+    var callback = options.callback;
+
+    var elementFilter = Array.prototype.concat.apply([], options.queries.map(function(query) {
+      return query.elementFilter ? query.elementFilter : [];
+    }));
+    if (!elementFilter.length)
+      elementFilter = undefined;
+
+    var calcReordered = options.queries.some(function(query) {
+      return query.all;
+    });
+
+    var queryValidators = []
+    if (MutationSummary.createQueryValidator) {
+      queryValidators = options.queries.map(function(query) {
+        return MutationSummary.createQueryValidator(root, query);
+      });
+    }
+
+    function checkpointQueryValidators() {
+      queryValidators.forEach(function(validator) {
+        if (validator)
+          validator.recordPreviousState();
+      });
+    }
+
+    function runQueryValidators(summaries) {
+      queryValidators.forEach(function(validator, index) {
+        if (validator)
+          validator.validate(summaries[index]);
+      });
+    }
+
+    function createSummaries(mutations) {
+      if (!mutations || !mutations.length)
+        return [];
+
+      var projection = new MutationProjection(root, elementFilter, calcReordered, options.oldPreviousSibling);
+      projection.processMutations(mutations);
+
+      return options.queries.map(function(query) {
+        return createSummary(projection, root, query);
+      });
+    }
+
+    function changesToReport(summaries) {
+      return summaries.some(function(summary) {
+        var summaryProps =  ['added', 'removed', 'reordered', 'reparented',
+                             'valueChanged', 'characterDataChanged'];
+        if (summaryProps.some(function(prop) { return summary[prop] && summary[prop].length; }))
+          return true;
+
+        if (summary.attributeChanged) {
+          var attrsChanged = Object.keys(summary.attributeChanged).some(function(attrName) {
+            return summary.attributeChanged[attrName].length
+          });
+          if (attrsChanged)
+            return true;
+        }
+        return false;
+      });
+    }
+
+    var observer = new MutationObserver(function(mutations) {
+      if (!options.observeOwnChanges)
+        observer.disconnect();
+
+      var summaries = createSummaries(mutations);
+      runQueryValidators(summaries);
+
+      if (options.observeOwnChanges)
+        checkpointQueryValidators();
+
+      if (changesToReport(summaries))
+        callback(summaries);
+
+      // disconnect() may have been called during the callback.
+      if (!options.observeOwnChanges && connected) {
+        checkpointQueryValidators();
+        observer.observe(root, observerOptions);
+      }
+    });
+
+    this.reconnect = function() {
+      if (connected)
+        throw Error('Already connected');
+
+      observer.observe(root, observerOptions);
+      connected = true;
+      checkpointQueryValidators();
+    };
+
+    var takeSummaries = this.takeSummaries = function() {
+      if (!connected)
+        throw Error('Not connected');
+
+      var mutations = observer.takeRecords();
+      var summaries = createSummaries(mutations);
+      if (changesToReport(summaries))
+        return summaries;
+    };
+
+    this.disconnect = function() {
+      var summaries = takeSummaries();
+
+      observer.disconnect();
+      connected = false;
+
+      return summaries;
+    };
+
+    this.reconnect();
+  }
+
+  // Externs
+  global.MutationSummary = MutationSummary;
+  global.MutationSummary.NodeMap = NodeMap; // exposed for use in TreeMirror.
+  global.MutationSummary.parseElementFilter = parseElementFilter; // exposed for testing.
+})(this);
+// Copyright 2011 Google Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+function TreeMirror(root, delegate) {
+  this.root = root;
+  this.idMap = {};
+  this.delegate = delegate;
+}
+
+TreeMirror.prototype = {
+  initialize: function(rootId, children) {
+    this.idMap[rootId] = this.root;
+
+    for (var i = 0; i < children.length; i++)
+      this.deserializeNode(children[i], this.root);
+  },
+
+  deserializeNode: function(nodeData, parent) {
+    if (nodeData === null)
+      return null;
+
+    if (typeof nodeData == 'number')
+      return this.idMap[nodeData];
+
+    var doc = this.root; //instanceof HTMLDocument ? this.root : this.root.ownerDocument;
+
+    var node;
+    switch(nodeData.nodeType) {
+      case Node.COMMENT_NODE:
+        node = doc.createComment(nodeData.textContent);
+        break;
+
+      case Node.TEXT_NODE:
+        node = doc.createTextNode(nodeData.textContent);
+        break;
+
+      case Node.DOCUMENT_TYPE_NODE:
+        node = doc.implementation.createDocumentType(nodeData.name, nodeData.publicId, nodeData.systemId);
+        break;
+
+      case Node.ELEMENT_NODE:
+        //  Check if node has ignore attribute  if so, do not render. //
+        if (nodeData.attributes && nodeData.attributes["ignore"])
+          return;
+
+        if (this.delegate && this.delegate.createElement)
+          node = this.delegate.createElement(nodeData.tagName);
+        if (!node)
+          node = doc.createElement(nodeData.tagName);
+
+        Object.keys(nodeData.attributes).forEach(function(name) {
+          if (!this.delegate ||
+              !this.delegate.setAttribute ||
+              !this.delegate.setAttribute(node, name, nodeData.attributes[name])) {
+            node.setAttribute(name, nodeData.attributes[name]);
+          }
+        }, this);
+
+        break;
+    }
+
+    this.idMap[nodeData.id] = node;
+
+    if (parent)
+      parent.appendChild(node);
+
+    if (nodeData.childNodes) {
+      for (var i = 0; i < nodeData.childNodes.length; i++)
+        this.deserializeNode(nodeData.childNodes[i], node);
+    }
+
+    return node;
+  },
+
+  applyChanged: function(removed, addedOrMoved, attributes, text) {
+    function removeNode(node) {
+      if (node.parentNode)
+        node.parentNode.removeChild(node);
+    }
+
+    function moveOrInsertNode(data) {
+      var parent = data.parentNode;
+      var previous = data.previousSibling;
+      var node = data.node;
+
+      parent.insertBefore(node, previous ? previous.nextSibling : parent.firstChild);
+    }
+
+    function updateAttributes(data) {
+      var node = this.deserializeNode(data.node);
+      Object.keys(data.attributes).forEach(function(attrName) {
+        var newVal = data.attributes[attrName];
+        if (newVal === null) {
+          node.removeAttribute(attrName);
+        } else {
+          if (!this.delegate ||
+              !this.delegate.setAttribute ||
+              !this.delegate.setAttribute(node, attrName, newVal)) {
+            node.setAttribute(attrName, newVal);
+          }
+        }
+      }, this);
+    }
+
+    function updateText(data) {
+      var node = this.deserializeNode(data.node);
+      node.textContent = data.textContent;
+    }
+
+    addedOrMoved.forEach(function(data) {
+      data.node = this.deserializeNode(data.node);
+      data.previousSibling = this.deserializeNode(data.previousSibling);
+      data.parentNode = this.deserializeNode(data.parentNode);
+
+      // NOTE: Applying the changes can result in an attempting to add a child
+      // to a parent which is presently an ancestor of the parent. This can occur
+      // based on random ordering of moves. The way we handle this is to first
+      // remove all changed nodes from their parents, then apply.
+      removeNode(data.node);
+    }, this);
+
+    removed.map(this.deserializeNode, this).forEach(removeNode);
+    addedOrMoved.forEach(moveOrInsertNode);
+    attributes.forEach(updateAttributes, this);
+    text.forEach(updateText, this);
+
+    removed.forEach(function(id) {
+      delete this.idMap[id]
+    }, this);
+  }
+}
+
+function TreeMirrorClient(target, mirror, testingQueries) {
+  this.target = target;
+  this.mirror = mirror;
+  this.knownNodes = new MutationSummary.NodeMap;
+
+  var rootId = this.serializeNode(target).id;
+  var children = [];
+  for (var child = target.firstChild; child; child = child.nextSibling)
+    children.push(this.serializeNode(child, true));
+
+  this.mirror.initialize(rootId, children);
+
+  var self = this;
+
+  var queries = [{ all: true }];
+
+  if (testingQueries)
+    queries = queries.concat(testingQueries);
+
+  this.mutationSummary = new MutationSummary({
+    rootNode: target,
+    callback: function(summaries) {
+      self.applyChanged(summaries);
+    },
+    queries: queries
+  });
+}
+
+TreeMirrorClient.prototype = {
+  nextId: 1,
+
+  disconnect: function() {
+    if (this.mutationSummary) {
+      this.mutationSummary.disconnect();
+      this.mutationSummary = undefined;
+    }
+  },
+
+  rememberNode: function(node) {
+    var id = this.nextId++;
+    this.knownNodes.set(node, id);
+    return id;
+  },
+
+  forgetNode: function(node) {
+    delete this.knownNodes.delete(node);
+  },
+
+  serializeNode: function(node, recursive) {
+    if (node === null)
+      return null;
+
+    var id = this.knownNodes.get(node);
+    if (id !== undefined) {
+      return id;
+    }
+
+    var data = {
+      nodeType: node.nodeType,
+      id: this.rememberNode(node)
+    };
+
+    switch(data.nodeType) {
+      case Node.DOCUMENT_TYPE_NODE:
+        data.name = node.name;
+        data.publicId = node.publicId;
+        data.systemId = node.systemId;
+        break;
+
+      case Node.COMMENT_NODE:
+      case Node.TEXT_NODE:
+        data.textContent = node.textContent;
+        break;
+
+      case Node.ELEMENT_NODE:
+        data.tagName = node.tagName;
+        data.attributes = {};
+        for (var i = 0; i < node.attributes.length; i++) {
+          var attr = node.attributes.item(i);
+          data.attributes[attr.name] = attr.value;
+        }
+
+        if (recursive && node.childNodes.length) {
+          data.childNodes = [];
+
+          for (var child = node.firstChild; child; child = child.nextSibling)
+            data.childNodes.push(this.serializeNode(child, true));
+        }
+        break;
+    }
+
+    return data;
+  },
+
+  serializeAddedAndMoved: function(changed) {
+    var all = changed.added.concat(changed.reparented).concat(changed.reordered);
+
+    var parentMap = new MutationSummary.NodeMap;
+    all.forEach(function(node) {
+      var parent = node.parentNode;
+      var children = parentMap.get(parent)
+      if (!children) {
+        children = new MutationSummary.NodeMap;
+        parentMap.set(parent, children);
+      }
+
+      children.set(node, true);
+    });
+
+    var moved = [];
+
+    parentMap.keys().forEach(function(parent) {
+      var children = parentMap.get(parent);
+
+      var keys = children.keys();
+      while (keys.length) {
+        var node = keys[0];
+        while (node.previousSibling && children.has(node.previousSibling))
+          node = node.previousSibling;
+
+        while (node && children.has(node)) {
+          moved.push({
+            node: this.serializeNode(node),
+            previousSibling: this.serializeNode(node.previousSibling),
+            parentNode: this.serializeNode(node.parentNode)
+          });
+
+          children.delete(node);
+          node = node.nextSibling;
+        }
+
+        var keys = children.keys();
+      }
+    }, this);
+
+    return moved;
+  },
+
+  serializeAttributeChanges: function(attributeChanged) {
+    var map = new MutationSummary.NodeMap;
+
+    Object.keys(attributeChanged).forEach(function(attrName) {
+      attributeChanged[attrName].forEach(function(element) {
+        var record = map.get(element);
+        if (!record) {
+          record = {
+            node: this.serializeNode(element),
+            attributes: {}
+          };
+          map.set(element, record);
+        }
+
+        record.attributes[attrName] = element.getAttribute(attrName);
+      }, this);
+    }, this);
+
+    return map.keys().map(function(element) {
+      return map.get(element);
+    });
+  },
+
+  serializeCharacterDataChange: function(node) {
+    return {
+      node: this.serializeNode(node),
+      textContent: node.textContent
+    }
+  },
+
+  applyChanged: function(summaries) {
+    var changed = summaries[0]
+    var removed = changed.removed.map(this.serializeNode, this);
+    var moved = this.serializeAddedAndMoved(changed);
+    var attributes = this.serializeAttributeChanges(changed.attributeChanged);
+    var text = changed.characterDataChanged.map(this.serializeCharacterDataChange, this);
+
+    this.mirror.applyChanged(removed, moved, attributes, text);
+
+    changed.removed.forEach(this.forgetNode, this);
+  }
+}
+var MAQAW_MIRROR_ENUMS = {
+  SHARE_SCREEN: 0, 
+  SHARE_SCREEN_OK: 1,
+  SHARE_SCREEN_REFUSE: 2,
+  SCREEN_DATA: 3,
+  MOUSE_MOVE: 4,
+  MOUSE_CLICK: 5,
+  SCROLL: 6,
+  INPUT: 7,
+  SIZE_REQUEST: 8,
+  SIZE: 9
+};
+
+function Mirror(options) {
+  // stores connection object if exists
+  this.conn = options && options.conn;
+  this.base;
+
+  this.mirrorDocument;
+  this.mirrorWindow;
+  this.mouseMirror;
+  this.inputMirror;
+
+  // whether or not we are currently viewing our peer's screen
+  this.isViewingScreen = false;
+
+}
+
+/*
+ * Called when the connection to our peer is reset
+ */
+Mirror.prototype.connectionReset = function () {
+   // if we were watching our peer's screen, tell that to start sending screen
+   //data again
+    if(this.mirrorWindow && !this.mirrorWindow.closed){
+        this.requestScreen();
+    }
+};
+
+Mirror.prototype.data = function(_data) {
+  //
+  // handle new data. For a new share screen
+  // request, function opens a new mirror
+  // for all other requests, function passes
+  // data to mirrorScreen
+  //
+  switch(_data.request) {
+    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN:
+      // Request from peer to view this screen  
+      this.conn.send({ type: MAQAW_DATA_TYPE.SCREEN, request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK });
+      this.shareScreen();
+      break;
+    case MAQAW_MIRROR_ENUMS.SHARE_SCREEN_OK:
+      //  Share screen request received and 
+      //  validated open a screen mirror 
+      this.openMirror();
+      break;
+    case MAQAW_MIRROR_ENUMS.SCREEN_DATA:
+      //  Screen Data.
+    case MAQAW_MIRROR_ENUMS.MOUSE_CLICK:
+      // Mouse click event
+    case MAQAW_MIRROR_ENUMS.MOUSE_MOVE:
+      // Mouse move event
+    case MAQAW_MIRROR_ENUMS.INPUT:
+      // Interactions with input elements
+      this.mirrorScreen(_data);  
+      break;
+    case MAQAW_MIRROR_ENUMS.SCROLL:
+      this.mirrorWindow.scrollTo(_data.left, _data.top);
+      break;
+    case MAQAW_MIRROR_ENUMS.SIZE:
+      this.mirrorDocument.body.style.width = _data.width;
+      break;
+    case MAQAW_MIRROR_ENUMS.SIZE_REQUEST:
+      this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.SIZE,
+        width: document.body.clientWidth
+      });
+      break;
+    default:
+      // Unknown
+      break;
+  }
+};
+
+Mirror.prototype.openMirror = function() {
+  var _this = this;
+
+  // if we are already viewing the screen, don't open a new window
+    if(!this.isViewingScreen) {
+         this.mirrorWindow = window.open();
+         this.mirrorDocument = this.mirrorWindow.document;
+
+        // attach a listener for if the window is closed
+        this.mirrorWindow.addEventListener('unload', function() {
+            // TODO: implement me
+            _this.isViewingScreen = false;
+        }, false);
+
+        // request dimensions for body
+        _this.conn.send({
+            type: MAQAW_DATA_TYPE.SCREEN,
+            request: MAQAW_MIRROR_ENUMS.SIZE_REQUEST
+        });
+
+    }
+
+    this.isViewingScreen = true;
+
+  this._mirror = new TreeMirror(this.mirrorDocument, {
+    createElement: function(tagName) {
+      if (tagName == 'SCRIPT') {
+        var node = _this.mirrorDocument.createElement('NO-SCRIPT');
+        node.style.display = 'none';
+        return node;
+      }
+
+      if (tagName == 'HEAD') {
+        var node = _this.mirrorDocument.createElement('HEAD');
+        node.appendChild(_this.mirrorDocument.createElement('BASE'));
+        node.firstChild.href = _this.base;
+        return node;
+      }
+    }
+  });
+  
+  this.mouseMirror = new MouseMirror(this.mirrorDocument, {
+    mousemove: function(event) {
+      _this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
+        coords: {x: event.pageX, y: event.pageY}
+      });
+    }, 
+    click: function(event) {
+        _this.conn.send({
+            type: MAQAW_DATA_TYPE.SCREEN,
+            request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
+            coords: {x: event.pageX, y: event.pageY},
+            target: maqawGetNodeHierarchy(_this.mirrorDocument, event.target)
+        });
+    },
+    rep: true
+  });
+
+  this.inputMirror = new MaqawInputMirror(this.mirrorDocument, {
+      multipleSelect: function(){
+          // get list of selected options
+          var selectedOptions = [];
+          for(var j = 0; j < this.selectedOptions.length; j++){
+              selectedOptions.push(this.selectedOptions[j].text);
+          }
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              selectedOptions: selectedOptions
+          });
+      },
+      singleSelect: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              selectedIndex: this.selectedIndex
+          });
+      }
+          ,
+      inputDefault: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              text: this.value
+          });
+      }
+          ,
+      radioAndCheckbox: function(){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.INPUT,
+              index: maqawGetNodeHierarchy(_this.mirrorDocument, this),
+              checked: this.checked
+          });
+      }
+  });
+};
+
+Mirror.prototype.setConnection = function(conn) {
+  // set a connection if established later
+  this.conn = conn;
+};
+
+Mirror.prototype.requestScreen = function() {
+  //
+  //  Sends share screen request to peer
+  //
+  if (this.conn) {
+    this.conn.send({ 
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SHARE_SCREEN
+    });
+  }
+};
+
+Mirror.prototype.shareScreen = function() {
+  //
+  // streams screen to peer
+  //
+  var _this = this;
+  if (this.conn) {
+
+    this.conn.send({
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+      clear: true 
+    });
+
+    this.conn.send({
+      type: MAQAW_DATA_TYPE.SCREEN,
+      request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+      base: location.href.match(/^(.*\/)[^\/]*$/)[1] 
+    });
+
+    var mirrorClient = new TreeMirrorClient(document, {
+
+      initialize: function(rootId, children) {
+        _this.conn.send({
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+          f: 'initialize',
+          args: [rootId, children]
+        });
+      },
+
+      applyChanged: function(removed, addedOrMoved, attributes, text) {
+        _this.conn.send({
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.SCREEN_DATA,
+          f: 'applyChanged',
+          args: [removed, addedOrMoved, attributes, text]
+        });
+      }
+    });
+
+    // remove old mouse mirror if applicable so there isn't a duplicate cursor
+    // from two screen sharing sessions
+
+    this.mouseMirror = new MouseMirror(document, {
+      mousemove: function(event) {
+        _this.conn.send({ 
+          type: MAQAW_DATA_TYPE.SCREEN,
+          request: MAQAW_MIRROR_ENUMS.MOUSE_MOVE,
+          coords: {x: event.pageX, y: event.pageY}
+        });
+      }, 
+      click: function(event) {
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.MOUSE_CLICK,
+              coords: {x: event.pageX, y: event.pageY},
+              target: maqawGetNodeHierarchy(document, event.target)
+          });
+      }
+    });
+  
+    // Set up scroll listener
+    window.addEventListener('scroll', scrollListener, false);
+    function scrollListener(){
+      var top = window.pageYOffset;
+      var left = window.pageXOffset;
+      _this.conn.send({
+        type: MAQAW_DATA_TYPE.SCREEN,
+        request: MAQAW_MIRROR_ENUMS.SCROLL,
+        top: top,
+        left: left
+      });
+    }
+
+
+
+    /* Set up listeners to input events */
+      this.inputMirror = new MaqawInputMirror(document, {
+          multipleSelect: function(){
+              // get list of selected options
+              var selectedOptions = [];
+              for(var j = 0; j < this.selectedOptions.length; j++){
+                  selectedOptions.push(this.selectedOptions[j].text);
+              }
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  selectedOptions: selectedOptions
+              });
+          },
+          singleSelect: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  selectedIndex: this.selectedIndex
+              });
+          }
+          ,
+          inputDefault: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  text: this.value
+              });
+          }
+          ,
+          radioAndCheckbox: function(){
+              _this.conn.send({
+                  type: MAQAW_DATA_TYPE.SCREEN,
+                  request: MAQAW_MIRROR_ENUMS.INPUT,
+                  index: maqawGetNodeHierarchy(document, this),
+                  checked: this.checked
+              });
+          }
+      });
+
+      // listener for window resize
+      var oldResize = window.onresize;
+      function newResize (){
+          _this.conn.send({
+              type: MAQAW_DATA_TYPE.SCREEN,
+              request: MAQAW_MIRROR_ENUMS.SIZE,
+              width: document.body.clientWidth
+          });
+
+          // call the old resize function as well if we overwrote one
+          if(oldResize){
+              oldResize();
+          }
+      }
+      window.onresize = newResize;
+
+  } else {
+    console.log("Error: Connection not established. Unable to stream screen");
+  }
+};
+
+Mirror.prototype.mirrorScreen = function(data) {
+  var _this = this;
+
+  function clearPage() {
+    // clear page //
+    while (_this.mirrorDocument.firstChild) {
+      _this.mirrorDocument.removeChild(_this.mirrorDocument.firstChild);
+    }
+  }
+
+  function handleMessage(msg) {
+    if (msg.clear){
+      clearPage();
+    }
+    else if (msg.base){
+      _this.base = msg.base;
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.SCREEN_DATA){
+      _this._mirror[msg.f].apply(_this._mirror, msg.args);
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE || msg.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK){
+        _this.mouseMirror.data(msg);
+    }
+    else if (msg.request === MAQAW_MIRROR_ENUMS.INPUT) {
+      _this.inputMirror.data(msg);
+    }
+  }
+
+  var msg = data;
+  if (msg instanceof Array) {
+    msg.forEach(function(subMessage) {
+      handleMessage(JSON.parse(subMessage));
+    });
+  } else {
+    handleMessage(msg);
+  }
+};
+
+function MouseMirror(doc, options) {
+  this.CURSOR_RADIUS = 10;
+  this.moveEvent = options.mousemove;
+  this.clickEvent = options.click;
+  this.doc = doc;
+  var _this = this;
+  this.isRep = Boolean(options.rep);
+
+    // keep track of the last element that was clicked on
+  this.lastElementClicked;
+
+  this.cursor = this.doc.createElement('div'); 
+  this.cursor.style.backgroundImage = "url('http://gohapuna.com/wp/wp-content/uploads/2013/08/cursor.png')";
+  this.cursor.style.height = '30px';
+  this.cursor.style.width = '20px';
+  this.cursor.style.zIndex = 10000;
+  this.cursor.style.position = 'absolute';
+  this.cursor.style.top = '0px';
+  this.cursor.style.left = '0px';
+  this.cursor.setAttribute("ignore", "true");
+
+    // maximum number of times per second mouse movement data will be sent
+    var MAX_SEND_RATE = 40;
+    // has enough time elapsed to send data again?
+    var isMouseTimeUp = true;
+    function moveMouse(event){
+      if(isMouseTimeUp){
+          _this.moveEvent(event);
+          isMouseTimeUp = false;
+          setTimeout(function(){isMouseTimeUp = true;}, 1000 / MAX_SEND_RATE);
+      }
+    }
+
+
+  this.doc.addEventListener('mousemove', moveMouse, false);
+  this.doc.addEventListener('click', this.clickEvent, false);
+
+
+  this.isDrawn = false;
+
+  return this;
+}
+
+MouseMirror.prototype.data = function(_data) {
+
+  if (!this.isDrawn) {
+    //  Hack that appends cursor only  
+    //  once a document.body exists
+    if (this.doc.body) {
+      this.doc.body.appendChild(this.cursor);
+      this.isDrawn = true;
+    }
+  }
+
+  if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_MOVE) {
+    this.moveMouse(_data);
+  } else if (_data.request === MAQAW_MIRROR_ENUMS.MOUSE_CLICK) {
+    this.clickMouse(_data);
+  }
+
+};
+
+MouseMirror.prototype.moveMouse = function(_data) {
+  this.cursor.style.top = _data.coords.y + 'px';
+  this.cursor.style.left = _data.coords.x + 'px';
+};
+
+MouseMirror.prototype.clickMouse = function(_data) {
+    var x = _data.coords.x;
+    var y = _data.coords.y;
+    var _this = this;
+
+    // get the clicked element
+    var target = maqawGetNodeFromHierarchy(this.doc, _data.target);
+    // remove highlight from last clicked element
+    if(this.lastElementClicked){
+        if(this.isRep){
+            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element-rep\b/,'');
+        }
+        else {
+            this.lastElementClicked.className = this.lastElementClicked.className.replace(/\bmaqaw-mirror-clicked-element\b/,'');
+        }
+    }
+    // highlight the element that was clicked if it wasn't the body
+    if(target.tagName !== 'BODY'){
+        if(this.isRep){
+            target.className = target.className + ' maqaw-mirror-clicked-element-rep';
+        } else {
+            target.className = target.className + ' maqaw-mirror-clicked-element';
+        }
+        this.lastElementClicked = target;
+    }
+
+
+    function makeExpandingRing(){
+        var radius = 1;
+        var click = _this.doc.createElement('div');
+        click.style.width = 2*radius + 'px';
+        click.style.height = 2*radius + 'px';
+        click.style.backgroundColor = 'transparent';
+        click.style.border = '2px solid rgba(255, 255, 0, 1)';
+        click.style.borderRadius = '999px';
+        click.style.zIndex = 10000;
+        click.style.position = 'absolute';
+        click.style.top = y - radius + 'px';
+        click.style.left = x - radius + 'px';
+        click.setAttribute("ignore", "true");
+        _this.doc.body.appendChild(click);
+
+        var rate = 50;
+        var radiusIncrease = 2;
+        var transparency = 1;
+        var transparencyRate = .03;
+
+        (function expand() {
+            radius += radiusIncrease;
+            transparency -= transparencyRate;
+            click.style.border = '2px solid rgba(255, 255, 0, ' + transparency + ')';
+            click.style.width = 2*radius + 'px';
+            click.style.height = 2*radius + 'px';
+            click.style.top = y - radius + 'px';
+            click.style.left = x - radius + 'px';
+
+            if(transparency > 0){
+                setTimeout(expand, rate);
+            } else {
+                _this.doc.body.removeChild(click);
+            }
+        })();
+    }
+
+    var numRings = 6;
+    var ringSpacing = 300;
+    var ringCounter = 0;
+
+    function doRings (){
+        if(ringCounter < numRings){
+            makeExpandingRing();
+            ringCounter++;
+            setTimeout(doRings, ringSpacing);
+        }
+    }
+};
+
+MouseMirror.prototype.off = function() {
+  this.doc.removeEventListener('mousemove', this.moveEvent, false);
+  this.doc.removeEventListener('click', this.clickEvent, false);
+};
+
+
+/*
+ * Attach listeners to input elements so that they can be mirrored.
+ * doc - The document to search for input elements
+ * conn - The connection to use to send mirror updates about the inputs
+ */
+function MaqawInputMirror(doc, options){
+    this.doc = doc;
+    var _this = this;
+
+    this.radioAndCheckbox = options.radioAndCheckbox;
+    this.singleSelect = options.singleSelect;
+    this.multipleSelect = options.multipleSelect;
+    this.inputDefault = options.inputDefault;
+
+    function keyUpEvent(event){
+        var target = event.target;
+        if(target.tagName === 'INPUT'){
+            (_this.inputDefault.bind(target))();
+        }
+
+        else if(target.tagName === 'TEXTAREA'){
+            (_this.inputDefault.bind(target))();
+        }
+    }
+
+    function changeEvent(event){
+        var target = event.target;
+        if(target.tagName === 'INPUT'){
+            if(target.type === 'radio' || target.type === 'checkbox'){
+                (_this.radioAndCheckbox.bind(target))();
+            } else {
+                (_this.inputDefault.bind(target))();
+            }
+        }
+
+        else if(target.tagName === 'SELECT'){
+            if(target.type === 'select-one'){
+                (_this.singleSelect.bind(target))();
+            } else if(target.type === 'select-multiple'){
+                (_this.multipleSelect.bind(target))();
+            }
+        }
+    }
+
+    this.doc.addEventListener('keyup', keyUpEvent, false);
+    this.doc.addEventListener('change', changeEvent, false);
+}
+
+MaqawInputMirror.prototype.data = function(data){
+    // get the DOM node that was changed
+    var inputNode = maqawGetNodeFromHierarchy(this.doc, data.index);
+
+    // set the checked attribute if applicable
+    if(typeof data.checked !== 'undefined'){
+        inputNode.checked = data.checked;
+    }
+
+    // check for select options
+    else if (typeof data.selectedIndex !== 'undefined'){
+        inputNode.selectedIndex = data.selectedIndex;
+    }
+
+    // check for multiple select options
+    else if (typeof data.selectedOptions !== 'undefined'){
+        var i, option, length = inputNode.options.length, selectedOptions = data.selectedOptions,
+            optionsList = inputNode.options;
+        for (i = 0; i < length; i++ ) {
+            option = optionsList[i];
+            var index = selectedOptions.indexOf(option.text);
+            if(index !== -1){
+                option.selected = true;
+            } else {
+                option.selected = false;
+            }
+
+        }
+    }
+
+    // otherwise set text value
+    else {
+        inputNode.value = data.text;
+    }
+};
+
+MaqawInputMirror.prototype.off = function() {
+    this.doc.removeEventListener('keyup', this.inputDefault, false);
+    this.doc.removeEventListener('change', this.radioAndCheckbox, false);
+    this.doc.removeEventListener('change', this.singleSelect, false);
+    this.doc.removeEventListener('change', this.multipleSelect, false);
+};
 // Displays the visitors chat sessions
 // chatWindow - the div that displays the chats
 function MaqawChatManager(chatWindow) {
@@ -20,6 +2629,8 @@ MaqawChatManager.prototype.showVisitorChat = function(visitor) {
     // reset chat window and then show this visitor's chat session
     this.chatWindow.innerHTML = '';
     this.chatWindow.appendChild(visitor.chatSession.getContainer());
+    // scroll chat window to the latest text
+    visitor.chatSession.scrollToBottom();
 };
 
 // Clears the displayed chat session.
@@ -35,14 +2646,427 @@ MaqawChatManager.prototype.clear = function(visitor) {
 
 };/**
  * Created By: Eli
+ * Date: 7/24/13
+ */
+
+/*
+ * This is a wrapper class for a peerjs connection. It gracefully handles making the connection,
+ * reopening the connection when it drops, saving and loading connection state, and reliably transferring
+ * data over the connection.
+ *
+ * peer - The Peer object representing our client
+ * dstId - The peer id we want to connect with
+ * dataCallback - This function is passed any data that the connection receives
+ * connectionCallback - This function is called whenever the connection status changes. It is passed true
+ *      if the connection is open and false otherwise
+ * conn - Optional. This is a peerjs DataConnection object. If included, the MaqawConnection will use it
+ *      instead of creating a new one.
+ */
+
+function MaqawConnection(peer, dstId, conn) {
+    var that = this;
+    this.peer = peer;
+    this.dstId = dstId;
+
+    //  Callback arrays //
+    this.closeDirectives = [];
+    this.openDirectives = [];
+    this.dataDirectives = [];
+    this.errorDirectives = [];
+    this.changeDirectives = [];
+
+    // queue of messages to send reliably
+    this.reliableQueue = [];
+    // message that we are currently trying to send
+    this.reliableMessage = null;
+    // timeout to resend message when we don't hear back
+    this.reliableTimeout = null;
+    // the hash of the last reliable message we processed. Keep track of this so that we don't
+    // process the data more than once for a duplicate message
+    this.reliableLastMessageReceived = null;
+    // keep track of which messages we have acked and sent
+    this.ackNo = 0;
+    this.seqNo = 0;
+
+    // whether or not this connection is open. True if open and false otherwise
+    this.isConnected = false;
+
+    // whether or not the peer we are talking to has an established connection with the PeerServer.
+    // Their connection with the server will drop whenever they leave the page
+    this.isPeerConnectedToServer = true;
+
+    // the peerjs DataConnection object we are using
+    this.conn;
+
+    // if a DataConnection was provided then use it. Otherwise make a new one
+    if (conn) {
+        this.conn = conn;
+    } else {
+        this.conn = this.peer.connect(this.dstId, {reliable: true});
+    }
+
+    // check the current status of the connection. It may already be open if one was passed in
+    setConnectionStatus(this.conn.open);
+
+    setConnectionCallbacks();
+
+    /*
+     * Handle data that was received by this connection. Extract any meta data we need
+     * and pass the rest of it on to the data callback
+     */
+    function handleData(data) {
+        // if this is a reliable message, handle the acknowledgement
+        if (data.isReliable) {
+            // check if this message is an ack and handle it if it is
+            var hash = data.hash;
+            // if there is no data, then the message is an ack
+            if (!data.data) {
+                // if this hash matches the message we sent, we can stop
+                // sending it and start sending the next one
+                if(that.reliableMessage && that.reliableMessage.hash === hash){
+                    // cancel timeout to resend this message
+                    if(that.reliableTimeout){
+                        clearTimeout(that.reliableTimeout);
+                        that.reliableTimeout = null;
+                    }
+                    that.reliableMessage = null;
+                    // send the next message in the queue
+                    that.sendReliable();
+                }
+                // no data to process so we just return
+                return;
+            }
+
+            else {
+                sendAck(hash);
+                // remove the reliable wrapper and process the data normally
+                // if this message isn't a duplicate
+                if(that.reliableLastMessageReceived !== hash){
+                    data = data.data;
+                    that.reliableLastMessageReceived = hash;
+                }
+
+            }
+        }
+
+        else {
+            // non reliable data is stringified before being sent
+            // this was done to fix the slowness of packing mirror data
+            data = JSON.parse(data);
+        }
+
+        // pass the data to any onData callbacks that are binded
+        var i, dataLen = that.dataDirectives.length;
+        for (i = 0; i < dataLen; i++) {
+            that.dataDirectives[i](data);
+        }
+    }
+
+    /*
+     * Send our peer an acknowledgement of the reliable messages that we have received.
+     * Our ackNo is the next seqNo that we are expecting from our peer
+     */
+    function sendAck(hash) {
+        that.conn.send({
+            isReliable: true,
+            hash: hash
+        });
+    }
+
+    /*
+     * Update the status of the connection, and pass the status on to
+     * the connectionListener
+     */
+    function setConnectionStatus(connectionStatus) {
+        var i, len = that.changeDirectives.length;
+
+        // alert all of the binded callbacks
+        for (i = 0; i < len; i++) {
+            that.changeDirectives[i](connectionStatus);
+        }
+
+        // save the status
+        that.isConnected = connectionStatus;
+    }
+
+    /*
+     * Whether or not our peer is connected to the PeerServer. They will be briefly disconnected every time
+     * they change pages or reload. This is a faster way of knowing that our connection is broken than
+     * waiting for the DataConnection to alert us (which takes a few seconds). Once our peer reconnects to the
+     * server we need to reopen our DataConnection with them.
+     * connectionStatus - true if the peer is connected and false otherwise
+     */
+    this.setServerConnectionStatus = function (connectionStatus) {
+        // if our peer is not connected to the server, disconnect our DataChannel with them
+        if (!connectionStatus) {
+            setConnectionStatus(false);
+        }
+        // if the peer was previously disconnected but is now connected, try to reopen a DataChannel
+        // with them
+        if (!that.isPeerConnectedToServer && connectionStatus) {
+            attemptConnection();
+        }
+
+        // save connection status
+        that.isPeerConnectedToServer = connectionStatus;
+    };
+
+    /*
+     * Tries to open a DataChannel with our  peer. Will retry at a set interval for a set number
+     * of attempts before giving up.
+     */
+    function attemptConnection() {
+        // how many milliseconds we will wait until trying to connect again
+
+        /* TODO: Exponential backoff instead? */
+
+        var retryInterval = 8000;
+
+        //  The max number of times a connection will be attempted
+        var retryLimit = 5;
+        var numAttempts = 0;
+
+        /** TODO: We should look into running web workers **/
+
+            // create a function that will attempt to open a connection, and will retry
+            // every retryInterval milliseconds until a connection is established
+            // this function is immediately invoked
+        (function tryOpeningConnection() {
+            // start the connection opening process
+            if (!that.isConnected && numAttempts < retryLimit) {
+                numAttempts++;
+
+                // close old connection
+                if (that.conn) {
+                    that.conn.close();
+                }
+
+                // open a new connection
+                that.conn = that.peer.connect(that.dstId);
+
+                // attach event listeners to our new connection
+                setConnectionCallbacks();
+
+                // schedule it to try again in a bit. This will only run
+                // if our latest connection doesn't open
+                setTimeout(tryOpeningConnection, retryInterval);
+            }
+        })();
+    }
+
+    /*
+     * Handle a new peerjs connection request from our peer
+     */
+    this.newConnectionRequest = function (conn) {
+        console.log("erasing old connection");
+        // close the old connection
+        if (that.conn) {
+            that.conn.close();
+        }
+
+        // set up the new connection with callbacks
+        that.conn = conn;
+        setConnectionCallbacks();
+    };
+
+    /*
+     * Unreliable send function. No guarantee that the peer
+     * receives this data
+     */
+    this.send = function (data) {
+        that.conn.send(JSON.stringify(data));
+    };
+
+    /*
+     * Reliably sends data to the peer. A queue of items to send is made, and each item is resent
+     * until an ack is received. When this is called the next item in the queue is sent. If a data
+     * argument is included it is added to the queue.
+     * data - Optional message to add to the sending queue
+     */
+    this.sendReliable = function (data) {
+        // add data to queue
+        if (data) {
+            that.reliableQueue.push(data);
+        }
+
+        // send the first message, if a message isn't already being sent
+        // and if the queue isn't empty
+        if (!that.reliableMessage && that.reliableQueue.length > 0) {
+            var msg = that.reliableQueue.shift();
+            that.reliableMessage = {
+                isReliable: true,
+                hash: maqawHash(Date.now() + JSON.stringify(msg)),
+                data: msg
+            };
+
+            (function send() {
+                // if the connection is closed, try to open it
+                if (!that.conn.open) {
+                    attemptConnection();
+                } else {
+                    that.conn.send(that.reliableMessage);
+                }
+                // try again soon
+                that.reliableTimeout = setTimeout(send, 1000);
+            })();
+        }
+    };
+
+
+    this.on = function (_event, directive) {
+        // bind callback
+        if (_event === 'data')   this.dataDirectives.push(directive);
+        else if (_event === 'open')   this.openDirectives.push(directive);
+        else if (_event === 'close')  this.closeDirectives.push(directive);
+        else if (_event === 'error')  this.errorDirectives.push(directive);
+        else if (_event === 'change') this.changeDirectives.push(directive);
+
+        return this;
+    };
+
+    function setConnectionCallbacks() {
+        that.conn.on('open', function () {
+            setConnectionStatus(true);
+            handleOpen();
+        });
+
+        that.conn.on('data', function (data) {
+            // if we are receiving data the connection is definitely open
+            setConnectionStatus(true);
+            handleData(data);
+        });
+
+        that.conn.on('close', function (err) {
+            setConnectionStatus(false);
+            handleClose();
+        });
+
+        that.conn.on('error', function (err) {
+            console.log("Connection error: " + err);
+            var i, errorLen = that.errorDirectives.length;
+            for (i = 0; i < errorLen; i++) {
+                that.errorDirectives[i](err);
+            }
+            // try to reopen connection
+            setConnectionStatus(false);
+            attemptConnection();
+        });
+    }
+
+    function handleOpen() {
+        var i, len = that.openDirectives.length;
+        for (i = 0; i < len; i++) {
+            that.openDirectives[i]();
+        }
+    }
+
+    function handleClose() {
+        var i, len = that.closeDirectives.length;
+        for (i = 0; i < len; i++) {
+            that.closeDirectives[i]();
+        }
+    }
+}
+/*
+ * The ConnectionManager keeps track of existing connections and assists in creating
+ * new connections. You can explicitly create a new connection, or set a listener
+ * that alerts you when another peer establishes a connection with this peer.
+ * peer - Our peer object
+ */
+
+function MaqawConnectionManager(peer) {
+    var that = this;
+    this.peer = peer;
+    this.visitors;
+    this.representatives;
+    this.connectionDirectives = [];
+
+
+    // a list of all connections that we've created, where the key is the connecting peer id
+    // and the value is the MaqawConnection object
+    this.connectionList = {};
+
+    // a list of connections that were the result of incoming requests
+    this.incomingConnections = {};
+
+    /*
+     * Passed the list of visitors connected to the PeerServer. Update connections
+     * based on whether or not the associated visitor is connected
+     */
+    this.setVisitors = function (visitors) {
+        // go through our list of connections and update their connection status
+        for (var id in that.connectionList) {
+            var conn = that.connectionList[id];
+            // indexOf returns -1 if the array does not contain the id
+            var index = visitors.indexOf(id);
+            if (index !== -1) {
+                conn.setServerConnectionStatus(true);
+            } else {
+                conn.setServerConnectionStatus(false);
+            }
+        }
+    };
+
+    this.on = function (_event, directive) {
+        if (_event === 'connection') this.connectionDirectives.push(directive);
+
+        return this;
+    };
+
+    /*
+     * Listens for incoming connection requests. If we've already setup a MaqawConnection
+     * with the incoming peer, update the MaqawConnection with the new peerjs connection.
+     * Otherwise create and return a new MaqawConnection with the peerjs connection.
+     */
+    this.peer.on('connection', function (conn) {
+        // check for an existing connection with this peer
+        var existingConn = that.incomingConnections[conn.peer];
+        if (existingConn) {
+            existingConn.newConnectionRequest(conn);
+        }
+        // otherwise create a new MaqawConnection
+        else {
+            var i, len = that.connectionDirectives.length,
+                maqawConnection = new MaqawConnection(that.peer, null, conn);
+            for (i = 0; i < len; i++) {
+                that.connectionDirectives[i](maqawConnection);
+            }
+            // save the connection in our list
+            that.incomingConnections[conn.peer] = maqawConnection;
+        }
+    });
+
+    /*
+     * Create and return a new MaqawConnection object that connects to the
+     * given id. The connectionCallback is a function that will be called
+     * every time the state of the connection changes. Undetermined functionality
+     * when you call this with the same id multiple times. Don't do it.
+     */
+    this.newConnection = function (id) {
+        var connection = new MaqawConnection(that.peer, id);
+        that.connectionList[id] = connection;
+        return connection;
+    };
+
+    /*
+     * Get a connection for a specific id. If a connection exists, its MaqawConnection
+     * object is return. If no connection exists for that id, undefined is returned
+     */
+    this.getConnection = function (id) {
+        return that.connectionList[id];
+    };
+
+}
+/**
+ * Created By: Eli
  * Date: 7/15/13
  */
 
 function MaqawLoginPage(manager) {
     var that = this;
     var loginEndpoint = 'http://54.214.232.157:3000/login';
-    var email = 'test@test.com';
-    var password = 'test';
+    var email = 'konakid@gmail.com';
+    var password = 'asdfasdf';
 
     this.maqawManager = manager;
     /* Create elements that make up the login page */
@@ -52,7 +3076,7 @@ function MaqawLoginPage(manager) {
      // add text to header
     this.loginHeader = document.createElement('DIV');
     this.loginHeader.innerHTML = "Login";
-    this.loginHeader.className = 'maqaw-chat-header-text';
+    this.loginHeader.className = 'maqaw-header-text';
     this.header.appendChild(this.loginHeader);
 
 
@@ -81,7 +3105,9 @@ function MaqawLoginPage(manager) {
     emailField.setAttribute('id', "maqaw-login-user-field")
     emailField.setAttribute('size', "31");
     emailField.setAttribute('placeholder', 'email');
-    //emailField.value = email;
+    if(maqawDebug){
+        emailField.value = email;
+    }
     this.body.appendChild(emailField);
 
     var passwordField = document.createElement("input");
@@ -89,7 +3115,9 @@ function MaqawLoginPage(manager) {
     passwordField.setAttribute('name', "password");
     passwordField.setAttribute('id', "maqaw-login-password-field");
     passwordField.setAttribute('placeholder', 'password');
-    //passwordField.value = password;
+    if(maqawDebug){
+        passwordField.value = password;
+    }
     this.body.appendChild(passwordField);
 
 // submit button
@@ -155,7 +3183,7 @@ function MaqawLoginPage(manager) {
     // attempts a login with the supplied parameters
     this.loginWithParams = function(params){
         that.loginSuccess = false;
-        var retryRate = 100;
+        var retryRate = 2000;
         var maxAttempts = 10;
         var numAttempts = 0;
 
@@ -2374,10 +5402,12 @@ Socket.prototype.close = function() {
  * Time: 12:41 PM
  * To change this template use File | Settings | File Templates.
  */
+
+
 function maqawAjaxPost(url, params, callback) {
     var xhr;
 
-    if(typeof XMLHttpRequest !== 'undefined') xhr = new XMLHttpRequest();
+    if (typeof XMLHttpRequest !== 'undefined') xhr = new XMLHttpRequest();
     else {
         var versions = ["MSXML2.XmlHttp.5.0",
             "MSXML2.XmlHttp.4.0",
@@ -2385,12 +5415,13 @@ function maqawAjaxPost(url, params, callback) {
             "MSXML2.XmlHttp.2.0",
             "Microsoft.XmlHttp"]
 
-        for(var i = 0, len = versions.length; i < len; i++) {
+        for (var i = 0, len = versions.length; i < len; i++) {
             try {
                 xhr = new ActiveXObject(versions[i]);
                 break;
             }
-            catch(e){}
+            catch (e) {
+            }
         } // end for
     }
 
@@ -2398,7 +5429,7 @@ function maqawAjaxPost(url, params, callback) {
 
     function ensureReadiness() {
         // post completed
-        if(xhr.readyState === 4) {
+        if (xhr.readyState === 4) {
             callback(xhr);
         }
     }
@@ -2411,67 +5442,100 @@ function maqawAjaxPost(url, params, callback) {
 }
 
 var maqawCookies = {
-  //
-  // Thank you, Mozilla 
-  // Documentation at https://developer.mozilla.org/en-US/docs/Web/API/document.cookie
+    //
+    // Thank you, Mozilla
+    // Documentation at https://developer.mozilla.org/en-US/docs/Web/API/document.cookie
 
-  getItem: function (sKey) {
-    return decodeURI(document.cookie.replace(new RegExp("(?:(?:^|.*;)\\s*" + encodeURI(sKey).replace(/[\-\.\+\*]/g, "\\$&") + "\\s*\\=\\s*([^;]*).*$)|^.*$"), "$1")) || null;
-  },
-  setItem: function (sKey, sValue, vEnd, sPath, sDomain, bSecure) {
-    if (!sKey || /^(?:expires|max\-age|path|domain|secure)$/i.test(sKey)) { 
-      return false; 
+    getItem: function (sKey) {
+        return decodeURI(document.cookie.replace(new RegExp("(?:(?:^|.*;)\\s*" + encodeURI(sKey).replace(/[\-\.\+\*]/g, "\\$&") + "\\s*\\=\\s*([^;]*).*$)|^.*$"), "$1")) || null;
+    },
+    setItem: function (sKey, sValue, vEnd, sPath, sDomain, bSecure) {
+        if (!sKey || /^(?:expires|max\-age|path|domain|secure)$/i.test(sKey)) {
+            return false;
+        }
+        var sExpires = "";
+        if (vEnd) {
+            switch (vEnd.constructor) {
+                case Number:
+                    sExpires = vEnd === Infinity ? "; expires=Fri, 31 Dec 9999 23:59:59 GMT" : "; max-age=" + vEnd;
+                    break;
+                case String:
+                    sExpires = "; expires=" + vEnd;
+                    break;
+                case Date:
+                    sExpires = "; expires=" + vEnd.toGMTString();
+                    break;
+            }
+        }
+        document.cookie = encodeURI(sKey) + "=" + encodeURI(sValue) + sExpires + (sDomain ? "; domain=" + sDomain : "") + (sPath ? "; path=" + sPath : "") + (bSecure ? "; secure" : "");
+        return true;
+    },
+
+    removeItem: function (sKey, sPath) {
+        if (!sKey || !this.hasItem(sKey)) {
+            return false;
+        }
+        document.cookie = encodeURI(sKey) + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT" + (sPath ? "; path=" + sPath : "");
+        return true;
+    },
+
+    hasItem: function (sKey) {
+        return (new RegExp("(?:^|;\\s*)" + encodeURI(sKey).replace(/[\-\.\+\*]/g, "\\$&") + "\\s*\\=")).test(document.cookie);
     }
-    var sExpires = "";
-    if (vEnd) {
-      switch (vEnd.constructor) {
-        case Number:
-          sExpires = vEnd === Infinity ? "; expires=Fri, 31 Dec 9999 23:59:59 GMT" : "; max-age=" + vEnd;
-          break;
-        case String:
-          sExpires = "; expires=" + vEnd;
-          break;
-        case Date:
-          sExpires = "; expires=" + vEnd.toGMTString();
-          break;
-      }
-    }
-    document.cookie = encodeURI(sKey) + "=" + encodeURI(sValue) + sExpires + (sDomain ? "; domain=" + sDomain : "") + (sPath ? "; path=" + sPath : "") + (bSecure ? "; secure" : "");
-    return true;
-  },
-
-  removeItem: function (sKey, sPath) {
-    if (!sKey || !this.hasItem(sKey)) { return false; }
-    document.cookie = encodeURI(sKey) + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT" + (sPath ? "; path=" + sPath : "");
-    return true;
-  },
-
-  hasItem: function (sKey) {
-    return (new RegExp("(?:^|;\\s*)" + encodeURI(sKey).replace(/[\-\.\+\*]/g, "\\$&") + "\\s*\\=")).test(document.cookie);
-  }
 
 };
+
 /*
+ * Returns an array containing the position of the given node in the dom
+ */
+function maqawGetNodeHierarchy(doc, node) {
+    var index = [];
+    while (node !== doc.body) {
+        index.unshift(Array.prototype.indexOf.call(node.parentElement.children, node));
+        node = node.parentElement;
+    }
+    return index;
+}
+
+/*
+ * Given an array from maqawGetNodeHierarchy returns the specified node in the dom
+ */
+function maqawGetNodeFromHierarchy(doc, hierarchy){
+    var i, length = hierarchy.length, node = doc.body;
+          for(i = 0; i < length; i++){
+              node = node.children[hierarchy[i]];
+          }
+    return node;
+}
+
+function maqawHash(str){
+    var hash = 0;
+    if (str.length == 0) return hash;
+    for (i = 0; i < str.length; i++) {
+        char = str.charCodeAt(i);
+        hash = ((hash<<5)-hash)+char;
+        hash = hash & hash; // Convert to 32bit integer
+    }
+    return hash;
+}
+
+
+/*
+ * Type codes for sending data with a MaqawConnection
+ */
+var MAQAW_DATA_TYPE = {
+    TEXT: 0,
+    SCREEN: 1,
+    VISITOR_INFO: 2
+};/*
  Creates a chat window with a unique key to talk
  to a visitor.
  */
-function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, connectionCallback) {
-
+function MaqawChatSession(chatSessionContainer, sendTextFunction, srcName, dstName) {
+    var that = this;
     this.srcName = srcName;
     this.dstName = dstName;
-    this.dstId = dstId;
-    var that = this;
-    this.peer = peer;
-    this.isConnected = false;
-    this.conn;
-
-    // whether or not the chat session should allow a rep to send a message
-    // this will be updated based on the connection status with the visitor
-    this.isSendingAllowed;
-
-    // callback function for when the connection status changes. True is passed if a connection
-    // becomes open, and false is passed if the connection closes
-    this.connectionCallback = connectionCallback;
+    this.sendTextFunction = sendTextFunction;
 
     // parent div to display chat session
     this.mainContainer = chatSessionContainer;
@@ -2481,10 +5545,6 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
     this.textDisplay = document.createElement('DIV');
     this.textDisplay.className = 'maqaw-chat-display';
     this.mainContainer.appendChild(this.textDisplay);
-
-    this.textDisplay.addEventListener('load', function () {
-        alert('hi')
-    }, false);
 
     // put initial text in the display window
     this.textDisplay.innerHTML = "Questions or feedback? We're online and ready to help you!";
@@ -2496,14 +5556,12 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
     this.textInput.setAttribute('placeholder', 'Type and hit enter to chat');
     this.mainContainer.appendChild(this.textInput);
 
-
     // add listener to text input. Capture text when enter is pressed
-    try {
-        this.textInput.addEventListener("keyup", keyPress, false);
-    } catch (e) {
-        this.textInput.attachEvent("onkeyup", keyPress);
-    }
+    this.textInput.addEventListener("keyup", keyPress, false);
 
+    this.setPeerName = function(name){
+        that.dstName = name;
+    };
 
     function keyPress(e) {
         // check if enter was pressed
@@ -2521,8 +5579,8 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
     function handleInput(text) {
         // test if string is not just whitespace
         if (/\S/.test(text)) {
-            //send data to other side
-            if (that.conn) that.conn.send(text);
+            //send data to our chat buddy
+            that.sendTextFunction(text);
             // append new text to existing chat text
             that.textDisplay.innerHTML = that.textDisplay.innerHTML + "<p class='maqaw-chat-paragraph'>" +
                 "<span class='maqaw-chat-src-name'>" + that.srcName + ": </span>" + text + "</p>";
@@ -2541,6 +5599,12 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
 
     }
 
+    /*
+     * Called when text is received from a peer
+     */
+    this.newTextReceived = function (text) {
+        handleResponse(text);
+    };
 
     // scroll chat window to most recent text
     this.scrollToBottom = function () {
@@ -2557,186 +5621,47 @@ function MaqawChatSession(chatSessionContainer, peer, srcName, dstName, dstId, c
         that.textDisplay.innerHTML = text;
     };
 
-    // Attempts to open a peerjs connection if the connection is currently closed,
-    // and an id has been provided
-    this.openConnection = function (onOpenCallback) {
-        if (that.dstId) {
-            console.log(that + ": attempting connection with " + that.dstId + "at " + (new Date()).toLocaleTimeString());
-            that.conn = that.peer.connect(that.dstId, {reliable: false});
-            if (that.conn) {
-                that.conn.on('open', function () {
-                    console.log(that + ": Connection opened with " + that.dstId + " at " + (new Date()).toLocaleTimeString());
-                    // invoke the callback if one was provided
-                    onOpenCallback && onOpenCallback();
-                    connect(that.conn);
-                });
-                that.conn.on('error', function (err) {
-                    console.log("Connection error: " + err);
-                });
-            }
-        }
-    };
-
-    /* Set up peerjs connection handling for this chat session */
-    this.peer.on('connection', receiveRequestFromPeer);
-    function connect(c) {
-        console.log("in connect");
-        setConnectionStatus(true);
-        that.conn = c;
-        that.conn.on('data', function (data) {
-            console.log(data);
-            handleResponse(data);
-        });
-        that.conn.on('close', function (err) {
-            setConnectionStatus(false);
-        });
-
-
-    }
-
-    // An on Connection event that was triggered by receiving a connection from a peer
-    function receiveRequestFromPeer(conn) {
-        console.log("in receiveRequestFromPeer");
-        //setConnectionStatus(true);
-        that.conn = conn;
-
-        that.conn.on('open', function () {
-            console.log("on open in peer");
-            setConnectionStatus(true);
-        });
-
-        that.conn.on('data', function (data) {
-            console.log(data);
-            if (!that.isConnected) {
-                setConnectionStatus(true);
-            }
-            handleResponse(data);
-        });
-        that.conn.on('close', function (err) {
-            setConnectionStatus(false);
-        });
-
-        that.conn.on('error', function (err) {
-            console.log("Connection error: " + err);
-        });
-    }
-
-    // takes a boolean representing if the peer is connected or not
-    // updates the setting, and turns off the text input box if
-    // a connection is not active. Calls a connectionCallback as well
-    // if one was provided
-    function setConnectionStatus(connectionStatus) {
-        that.isConnected = connectionStatus;
-        console.log("Setting connection status to " + connectionStatus);
-
-        // change status of text input depending on connection
-        if (connectionStatus) {
+    /*
+     * Whether or not the the chat session should allow the user to send text. If set to true
+     * they can send text normally. If set to false the text input box is disabled
+     * displayMessage - Optional. A message to display to the rep
+     */
+    this.setAllowMessageSending = function (allowMessageSending, displayMessage) {
+        if (allowMessageSending) {
             allowMessages();
         } else {
-            disallowMessages();
+            disallowMessages(displayMessage);
         }
 
-        if (that.connectionCallback) {
-            that.connectionCallback(connectionStatus);
-        }
-    }
-
-    this.getIsConnected = function () {
-        return that.isConnected;
     };
 
-    // if the connection is open, close it
-    this.disconnect = function () {
-        if (that.isConnected) {
-            conn.close();
-        }
-    };
-
-    // the allowMessageSending flag tells the chatsession whether or not they
-    // should let the rep send messages to the client. This should be disallowed
-    // when the client's connection stop, and reallowed when the connection starts again
-    this.setAllowMessageSending = function (allowMessageSending) {
-        // only do something if the state changed
-        if (allowMessageSending !== that.isSendingAllowed) {
-            if (allowMessageSending) {
-                allowMessages();
-            } else {
-                disallowMessages();
-            }
-        }
-    };
-
-    // disallow sending messages until a connection is opened
+    // disallow sending messages by default until we are told otherwise
     // prevent a message from being sent
     var savedTextValue = null;
     disallowMessages();
 
-    // Finish by attempting to open a connection if applicable
-    if (that.dstId) {
-        attemptConnection();
-    }
-
-
-    function disallowMessages() {
-        console.log("In disallowed messages");
-        if (that.textInput) {
-            that.isSendingAllowed = false;
-            that.textInput.disabled = true;
-            // change text to reflect this, if it hasn't already been saved
-            if (savedTextValue == null) {
-                savedTextValue = that.textInput.value;
-                console.log("Saving value: " + savedTextValue);
-                that.textInput.value = "Connecting to peer...";
-            }
+    function disallowMessages(displayMessage) {
+        that.textInput.disabled = true;
+        // save any text the user is tying, if it hasn't already been saved
+        if (savedTextValue === null) {
+            savedTextValue = that.textInput.value;
         }
-        console.log('disallow messages');
+
+        if(displayMessage){
+            that.textInput.value = displayMessage;
+        }   else {
+            that.textInput.value = "Connecting to peer...";
+        }
     }
 
     // allow messages to be sent
     function allowMessages() {
-        console.log("In allow messages");
-        if (that.textInput) {
-            that.isSendingAllowed = true;
-            that.textInput.disabled = false;
-            // restore original text
-            if (savedTextValue !== null) {
-                console.log("Restoring value: " + savedTextValue);
-                that.textInput.value = savedTextValue;
-                savedTextValue = null;
-            }
+        that.textInput.disabled = false;
+        // restore original text
+        if (savedTextValue !== null) {
+            that.textInput.value = savedTextValue;
+            savedTextValue = null;
         }
-    }
-
-
-    function attemptConnection() {
-        // how many milliseconds we will wait until trying to connect again
-        var retryInterval = 8000;
-        var isConnected = false;
-
-        //  The max number of times a connection will be attempted
-        var retryLimit = 5;
-        var numAttempts = 0;
-
-        // this function is called when a successful connection is opened
-        function successCallback() {
-            isConnected = true;
-        }
-
-        // create a function that will attempt to open a connection, and will retry
-        // every retryInterval milliseconds until a connection is established
-        // this function is immediately invoked
-        (function tryOpeningConnection() {
-            // start the connection opening process
-            if (!isConnected && numAttempts < retryLimit) {
-                numAttempts++;
-                that.openConnection(successCallback);
-
-                // schedule it to try again in a bit.
-                setTimeout(tryOpeningConnection, retryInterval);
-            }
-        })();
-
-
     }
 }
 
@@ -2748,151 +5673,257 @@ MaqawChatSession.prototype.getContainer = function () {
 
 
 /*
- ClientSession manages client information and interactions
- with Maqaw.
+ VisitorSession manages a visitor's interaction with the Maqaw client. It contains the connection
+ with a representative, and handles all display and transfer of communication with that rep.
  */
-function MaqawVisitorSession(manager) {
+var MAQAW_VISITOR_ENUMS = {
+    INFO: 0,
+    ACK: 1
+};
+function MaqawVisitorSession(manager, visitorInfo) {
     var that = this;
     this.chatSession;
     this.maqawManager = manager;
-    // Whether or not there is a rep available to chat
-    this.isRepAvailable = false;
 
-    // initialize header container for this session
+    // Visitor info was passed in if it was previously stored. Otherwise it is undefined
+    this.visitorInfo = null;
+    if (visitorInfo) {
+        this.visitorInfo = new MaqawVisitorInfo(visitorInfo);
+    }
+
+    // the status of our connection with a peer. True for open and false for closed
+    // Defaults to false until we can verify that a connection has been opened
+    this.isConnected = false;
+
+    /* initialize header container for this session */
     this.header = document.createElement('DIV');
     this.header.className = 'maqaw-default-client-header';
+    // div to hold text in header
+    this.headerText = document.createElement('DIV');
+    this.headerText.className = 'maqaw-header-text';
+    this.header.appendChild(this.headerText);
+    // function to change the header text
+    function changeHeaderText(text) {
+        that.headerText.innerHTML = text;
+    }
 
-    // initialize body container
+    // set default text
+    changeHeaderText("Chat with us!");
+
+    /* initialize body container */
     this.body = document.createElement('DIV');
+    this.body.className = 'maqaw-visitor-session-body';
+    // content div holds the main content in the body
+    this.bodyContent = document.createElement('DIV');
+    this.body.appendChild(this.bodyContent);
+    // function to set what content is shown
+    function setBodyContent(div) {
+        if(that.bodyContent.firstChild !== div){
+            that.bodyContent.innerHTML = '';
+            that.bodyContent.appendChild(div);
+        }
+    }
 
-    /* Create elements that make up chat window */
-    this.loginHeader = document.createElement('DIV');
-    this.loginHeader.innerHTML = "Chat with me!";
-    this.loginHeader.className = 'maqaw-chat-header-text';
-
-    // create div to hold chat info
-    this.visitorChatWindow = document.createElement('DIV');
-    this.visitorChatWindow.className = 'maqaw-client-chat-window';
-
-    // add chat session
+    /* Create chat container and session */
     var chatSessionContainer = document.createElement("DIV");
-    this.visitorChatWindow.appendChild(chatSessionContainer);
+    this.chatSession = new MaqawChatSession(chatSessionContainer, sendTextFromChat, 'You', this.maqawManager.chatName);
 
+    /* Create container for when no rep is available */
+    var noRepContainer = document.createElement("DIV");
+    noRepContainer.id = 'maqaw-no-rep-window';
+    noRepContainer.innerHTML = 'Sorry, there are no representatives available to chat';
+    // default to showing the noRepContainer until a connection with a rep is made
+    setBodyContent(noRepContainer);
 
-    // create MaqawChatSession
-    // don't include a connection id so that no connection is started from this end. Leave
-    // it to the rep to start a connection
-    chatSessionContainer.innerHTML = '';
-    this.chatSession = new MaqawChatSession(chatSessionContainer, that.maqawManager.peer, 'You', this.maqawManager.chatName);
+    /* Create a form to get the visitor's name and email address before chatting */
+    var visitorInfoContainer = document.createElement("DIV");
+    visitorInfoContainer.id = 'maqaw-visitor-session-info';
+    // Text instructions
+    var infoInstructions = document.createElement("DIV");
+    infoInstructions.id = 'maqaw-visitor-info-instructions';
+    infoInstructions.innerHTML = "Enter your name and email to start chatting with us!";
+    visitorInfoContainer.appendChild(infoInstructions);
+    // field for visitor name
+    var nameField = document.createElement("input");
+    nameField.setAttribute('type', "text");
+    nameField.setAttribute('id', "maqaw-visitor-name-field");
+    nameField.setAttribute('placeholder', 'Name');
+    visitorInfoContainer.appendChild(nameField);
+    // field for visitor email
+    var emailField = document.createElement("input");
+    emailField.setAttribute('type', "text");
+    emailField.setAttribute('id', "maqaw-visitor-email-field");
+    emailField.setAttribute('placeholder', 'Email');
+    visitorInfoContainer.appendChild(emailField);
+    // submit button
+    var infoSubmitButton = document.createElement('DIV');
+    infoSubmitButton.id = 'maqaw-visitor-info-button';
+    infoSubmitButton.innerHTML = 'Ok';
+    visitorInfoContainer.appendChild(infoSubmitButton);
+    // submit button callback
+    infoSubmitButton.addEventListener('click', visitorInfoEntered, false);
+    // callback function for when the visitor submits their info in the form
+    function visitorInfoEntered() {
+        var name = nameField.value;
+        var email = emailField.value;
+        // TODO: Display error message for invalid name or email
+        // check to make sure name and email aren't blank
+        if (name !== '' && email !== '') {
+            setVisitorInfo({
+                name: name,
+                email: email
+            });
+        }
+    }
 
-    // add footer
-    var chatFooter;
-    chatFooter = document.createElement('DIV');
-    chatFooter.id = 'maqaw-chat-footer';
-    this.visitorChatWindow.appendChild(chatFooter);
+    // updates this visitor's personal information, shares the info with the connected rep,
+    // and allows the chat window to be shown now that we have the visitor's info
+    function setVisitorInfo(info) {
+        // store the visitor's info
+        that.visitorInfo = new MaqawVisitorInfo(info);
+        // send the info to the rep
+        sendVisitorInfo();
+        // call the connectionStatusCallback so that this visitor can be shown the chat window
+        // now that we have their info
+        connectionStatusCallback(that.isConnected);
+    }
+
+    // transmit the visitor's info to our peer
+    function sendVisitorInfo() {
+        // make sure we have info and a connection
+        if (that.visitorInfo && that.connection) {
+            // send the data to the rep
+            that.connection.sendReliable({
+                type: MAQAW_DATA_TYPE.VISITOR_INFO,
+                request: MAQAW_VISITOR_ENUMS.INFO,
+                info: JSON.stringify(that.visitorInfo)
+            });
+        }
+    }
+
+    /* Add footer to body */
+    this.bodyFooter = document.createElement('DIV');
+    this.bodyFooter.id = 'maqaw-visitor-session-footer';
+    this.body.appendChild(this.bodyFooter);
 
     // add login button to footer
-    var loginButton;
-    loginButton = document.createElement('DIV');
+    var loginButton = document.createElement('DIV');
     loginButton.id = 'maqaw-login-button';
-    loginButton.innerHTML = "Login"
-    chatFooter.appendChild(loginButton);
+    loginButton.innerHTML = "Login";
+    this.bodyFooter.appendChild(loginButton);
 
     // setup callback for when login is clicked
     loginButton.addEventListener('click', this.maqawManager.loginClicked, false);
 
     // add Maqaw link to footer
-    var maqawLink;
-    maqawLink = document.createElement('DIV');
+    var maqawLink = document.createElement('DIV');
     maqawLink.id = 'maqaw-link';
     maqawLink.innerHTML = 'POWERED BY <a href="http://maqaw.com">MAQAW</a>';
-    chatFooter.appendChild(maqawLink);
+    this.bodyFooter.appendChild(maqawLink);
 
-    /* Create container for when no rep is available */
-    this.noRepWindow = document.createElement("DIV");
-    this.noRepWindow.id = 'maqaw-no-rep-window';
-    this.noRepWindow.className = 'maqaw-client-chat-window'
-    this.noRepWindow.innerHTML = '';
+    /* Set up the connection */
+    this.connection = null;
+    this.mirror = new Mirror();
 
-    var noRepText = document.createElement("DIV");
-    noRepText.className = 'maqaw-chat-display';
-    noRepText.innerHTML = 'Sorry, there are no representatives available to chat';
-    this.noRepWindow.appendChild(noRepText);
+    this.maqawManager.connectionManager.on('connection', function (maqawConnection) {
+        if (that.connection) {
+            console.log("Warning: Overwriting existing connection");
+        }
+        that.connection = maqawConnection;
+        that.mirror.setConnection(that.connection);
 
-    this.noRepHeader = document.createElement('DIV');
-    this.noRepHeader.innerHTML = "Send us an email!";
-    this.noRepHeader.className = 'maqaw-chat-header-text';
+        maqawConnection.on('data', connectionDataCallback)
+            .on('change', connectionStatusCallback)
+            .on('open', connectionOpenCallback);
+    });
 
-    // add footer
-    var noRepFooter;
-    noRepFooter = document.createElement('DIV');
-    noRepFooter.id = 'maqaw-chat-footer';
-    this.noRepWindow.appendChild(noRepFooter);
-
-    // add login button to footer
-    var noRepLoginButton;
-    noRepLoginButton = document.createElement('DIV');
-    noRepLoginButton.id = 'maqaw-login-button';
-    noRepLoginButton.innerHTML = "Login"
-    noRepFooter.appendChild(noRepLoginButton);
-
-    // setup callback for when login is clicked
-    noRepLoginButton.addEventListener('click', this.maqawManager.loginClicked, false);
-
-    // add Maqaw link to footer
-    var maqawLink;
-    maqawLink = document.createElement('DIV');
-    maqawLink.id = 'maqaw-link';
-    maqawLink.innerHTML = 'POWERED BY <a href="http://maqaw.com">MAQAW</a>';
-    noRepFooter.appendChild(maqawLink);
-
-    // set the chat window to default to no rep
-    setNoRepPage();
-
-    function setClientChat() {
-        that.body.innerHTML = '';
-        that.body.appendChild(that.visitorChatWindow);
-        that.header.innerHTML = '';
-        that.header.appendChild(that.loginHeader);
-    }
-
-    function setNoRepPage() {
-        that.body.innerHTML = '';
-        that.body.appendChild(that.noRepWindow);
-        that.header.innerHTML = '';
-        that.header.appendChild(that.noRepHeader);
+    /*
+     * Called whenever a new connection with our peer is established. This can happen multiple times,
+     * like when the rep changes pages and a new connection has to be made.
+     */
+    function connectionOpenCallback() {
+        // make sure the rep has this visitor's info
+        connectionStatusCallback(true);
+        sendVisitorInfo();
     }
 
     /*
-     Updates whether or not their is an available rep for the visitor to chat with.
-     Pass in true if there is a rep available or false otherwise.
+     * For a connection received from the newConnectionListener, this function will be called by the connection
+     * when data is received through the connection
      */
-    this.setIsRepAvailable = function(isRepAvailable){
-        if(isRepAvailable !== that.isRepAvailable){
-            if(isRepAvailable) {
-                setClientChat();
+    function connectionDataCallback(data) {
+        // handle text
+        if (data.type === MAQAW_DATA_TYPE.TEXT) {
+            that.chatSession.newTextReceived(data.text);
+        }
+        if (data.type === MAQAW_DATA_TYPE.SCREEN) {
+            that.mirror && that.mirror.data(data);
+        }
+    }
+
+    /*
+     * For a connection received from the newConnectionListener, this function will be called by the connection
+     * whenever the status of the connection changes. The connection status will be passed,
+     * with true representing an open connection and false representing closed.
+     */
+    function connectionStatusCallback(connectionStatus) {
+        that.isConnected = connectionStatus;
+
+        // update chat session to reflect connection status
+        that.chatSession.setAllowMessageSending(connectionStatus);
+
+        // show a different page if there is no connection with a rep
+        if (connectionStatus) {
+            // if they've enter their info, show them the chat window
+            if (that.visitorInfo) {
+                setBodyContent(chatSessionContainer);
+                that.chatSession.scrollToBottom();
             }
+            // otherwise ask for their information
             else {
-                setNoRepPage();
+                setBodyContent(visitorInfoContainer);
             }
         }
-        this.isRepAvailable = isRepAvailable;
-    };
+        else {
+            setBodyContent(noRepContainer);
+        }
+    }
 
-
+    /*
+     * This function is passed to the Chat Session. The session will call it whenever it has text
+     * to send to the peer.
+     */
+    function sendTextFromChat(text) {
+        if (!that.connection || !that.isConnected) {
+            console.log("Error: Cannot send text. Bad connection");
+        } else {
+            that.connection.sendReliable({
+                type: MAQAW_DATA_TYPE.TEXT,
+                text: text
+            });
+        }
+    }
 
     // returns an object containing the data that constitutes this visitors session
-    this.getSessionData = function() {
+    this.getSessionData = function () {
         return {
-            chatText: that.chatSession.getText()
+            chatText: that.chatSession.getText(),
+            info: JSON.stringify(that.visitorInfo)
         };
     };
 
     // takes an visitor session data object (from getSessionData) and loads this visitor
     // session with it
-    this.loadSessionData = function(sessionData) {
-        that.chatSession.setText(sessionData.chatText);
-    }
+    this.loadSessionData = function (sessionData) {
+        if (sessionData.chatText) {
+            that.chatSession.setText(sessionData.chatText);
+        }
+
+        var info = JSON.parse(sessionData.info);
+        if (info) {
+            setVisitorInfo(info);
+        }
+    };
 }
 
 MaqawVisitorSession.prototype.getBodyContents = function () {
@@ -2904,8 +5935,6 @@ MaqawVisitorSession.prototype.getHeaderContents = function () {
 };
 
 
-
-
 /*
  MaqawManager is the top level class for managing the Maqaw client
  */
@@ -2918,20 +5947,18 @@ function MaqawManager(options, display) {
     this.key = options.key;
     this.chatName = options.name;
 
+    // list of all visitors connected to the server
+    this.visitors = [];
+
     // this id is used whenever the client makes a connection with peerjs
     this.id = maqawCookies.getItem('peerId');
     // an array of ids of representatives that are available for chat
-    this.representatives;
     this.maqawDisplay = display;
     this.visitorSession;
     this.repSession;
 
     // a MaqawLoginPage object that can be used to login with rep details
     this.loginPage;
-
-    // the most recent list of visitors from the server
-    this.visitors = [];
-
 
     if (this.id) {
         //  peer id has been stored in the browser. Use it
@@ -2941,35 +5968,46 @@ function MaqawManager(options, display) {
         this.peer = new Peer({key: this.key, host: host, port: port});
     }
 
+    // initialize the connection manager
+    this.connectionManager = new MaqawConnectionManager(this.peer);
+
     /* listen for peer js events */
     this.peer.on('open', function (id) {
+        console.log("My id: " + id);
         that.id = id;
-        console.log("My id: "+id);
-
         maqawCookies.setItem('peerId', id, Infinity);
-
     });
 
     this.peer.on('clients', function (visitors) {
         console.log('visitors: ' + visitors.msg);
         that.visitors = visitors.msg;
-        that.repSession && that.repSession.updateVisitorList(visitors.msg);
-    });
-
-    this.peer.on('clients', function (visitors) {
-        console.log("second on clients!");
+        that.handleVisitorList(that.visitors);
     });
 
     this.peer.on('representatives', function (reps) {
         console.log('Reps: ' + reps.msg);
         that.representatives = reps.msg;
-        updateReps();
     });
+
+    /*
+     * Receives an array of visitors from the Peer Server and passes
+     * the information along to VisitorList and ConnectionManager
+     */
+    this.handleVisitorList = function (visitors) {
+        that.repSession && that.repSession.visitorList.setVisitorList(visitors);
+        that.connectionManager.setVisitors(visitors);
+    };
+
+    this.screenShareClicked = function(event) {
+      event.preventDefault();  
+      event.stopPropagation();
+      
+    };
 
     // function called the VisitorSession when the login button is clicked
     this.loginClicked = function () {
         // create and display a new LoginPage object if one doesn't already exist
-        if(!that.loginPage){
+        if (!that.loginPage) {
             that.loginPage = new MaqawLoginPage(that);
         }
         that.maqawDisplay.setHeaderContents(that.loginPage.getHeaderContents());
@@ -3038,19 +6076,13 @@ function MaqawManager(options, display) {
         }
 
         // otherwise reload the rep session
-        if(!that.loginPage){
+        if (!that.loginPage) {
             that.loginPage = new MaqawLoginPage(that);
         }
         that.loginPage.loginWithParams(loginCookie);
         that.loadPreviousRepSession = true;
         return true;
-    }
-
-
-    // updates the status of the available reps for visitor chat
-    function updateReps() {
-        that.visitorSession.setIsRepAvailable(that.representatives.length !== 0);
-    }
+    };
 
     // setup an event listener for when the page is changed so that we can save the
     // visitor session
@@ -3080,204 +6112,9 @@ function MaqawManager(options, display) {
 
     }
 
+    // Add listener to save session state on exit so it can be reloaded later.
     window.addEventListener('unload', saveSession, false);
 }
-
-// takes a MaqawVisitorSession object and loads it as the current visitor session
-MaqawManager.prototype.setVisitorSession = function (visitorSession) {
-    this.visitorSession = visitorSession;
-};
-
-
-
-
-
-/*
- MaqawManager is the top level class for managing the Maqaw client
- */
-function MaqawManager(options, display) {
-    var that = this,
-        host = '54.214.232.157',
-        port = 3000;
-
-    // the key that peers will use to connect to each other on the peer server
-    this.key = options.key;
-    this.chatName = options.name;
-
-    // this id is used whenever the client makes a connection with peerjs
-    this.id = maqawCookies.getItem('peerId');
-    // an array of ids of representatives that are available for chat
-    this.representatives;
-    this.maqawDisplay = display;
-    this.visitorSession;
-    this.repSession;
-
-    // a MaqawLoginPage object that can be used to login with rep details
-    this.loginPage;
-
-    // the most recent list of visitors from the server
-    this.visitors = [];
-
-
-    if (this.id) {
-        //  peer id has been stored in the browser. Use it
-        this.peer = new Peer(this.id, {key: this.key, host: host, port: port});
-    } else {
-        //  No peer id cookie found. Retrieve new id from browser
-        this.peer = new Peer({key: this.key, host: host, port: port});
-    }
-
-    /* listen for peer js events */
-    this.peer.on('open', function (id) {
-        that.id = id;
-        console.log("My id: "+id);
-
-        maqawCookies.setItem('peerId', id, Infinity);
-
-    });
-
-    this.peer.on('clients', function (visitors) {
-        console.log('visitors: ' + visitors.msg);
-        that.visitors = visitors.msg;
-        that.repSession && that.repSession.updateVisitorList(visitors.msg);
-    });
-
-    this.peer.on('clients', function (visitors) {
-        console.log("second on clients!");
-    });
-
-    this.peer.on('representatives', function (reps) {
-        console.log('Reps: ' + reps.msg);
-        that.representatives = reps.msg;
-        updateReps();
-    });
-
-    // function called the VisitorSession when the login button is clicked
-    this.loginClicked = function () {
-        // create and display a new LoginPage object if one doesn't already exist
-        if(!that.loginPage){
-            that.loginPage = new MaqawLoginPage(that);
-        }
-        that.maqawDisplay.setHeaderContents(that.loginPage.getHeaderContents());
-        that.maqawDisplay.setBodyContents(that.loginPage.getBodyContents());
-    };
-
-
-    this.logoutClicked = function () {
-        // clear cookies and local data for the rep
-        maqawCookies.removeItem('maqawRepLoginCookie');
-        localStorage.removeItem('maqawRepSession');
-        that.showVisitorSession();
-    };
-
-    // displays the saved visitor session
-    this.showVisitorSession = function () {
-        that.maqawDisplay.setHeaderContents(that.visitorSession.getHeaderContents());
-        that.maqawDisplay.setBodyContents(that.visitorSession.getBodyContents());
-    };
-
-    // tries to load a previously saved visitor session. If no session can be found
-    // a new one is created
-    this.startVisitorSession = function () {
-        // create new visitor session
-        var visitorSession = new MaqawVisitorSession(that);
-        // try to pull previously saved session data
-        var storedSessionData = JSON.parse(localStorage.getItem('maqawVisitorSession'));
-        // if previous data was found load it into the visitorSession
-        if (storedSessionData) {
-            visitorSession.loadSessionData(storedSessionData);
-        }
-        // save the session
-        that.visitorSession = visitorSession;
-    };
-
-    // Creates and displays a new MaqawRepSession using the MaqawRepresentative object that
-    // is passed in.
-    this.startNewRepSession = function (rep) {
-        that.repSession = new MaqawRepSession(that, rep);
-
-        // if we are loading a saved session, retrieve stored data
-        if (that.loadPreviousRepSession) {
-            // attempt to reload previous rep session data
-            var storedSessionData = JSON.parse(localStorage.getItem('maqawRepSession'));
-            // if previous data was found load it into the repSession
-            if (storedSessionData) {
-                that.repSession.loadSessionData(storedSessionData);
-            }
-        }
-
-        // update the session with the current list of visitors
-        that.repSession.updateVisitorList(that.visitors);
-
-        // display the rep session
-        that.maqawDisplay.setHeaderContents(that.repSession.getHeaderContents());
-        that.maqawDisplay.setBodyContents(that.repSession.getBodyContents());
-    };
-
-    // checks for a login cookie for a rep. If one is found we attempt to reload the session
-    // return true if a rep session is successfully loaded and false otherwise
-    this.loadRepSession = function () {
-        // check for a login cookie, return false if one can't be found
-        var loginCookie = maqawCookies.getItem('maqawRepLoginCookie');
-        if (loginCookie === null) {
-            return false;
-        }
-
-        // otherwise reload the rep session
-        if(!that.loginPage){
-            that.loginPage = new MaqawLoginPage(that);
-        }
-        that.loginPage.loginWithParams(loginCookie);
-        that.loadPreviousRepSession = true;
-        return true;
-    }
-
-
-    // updates the status of the available reps for visitor chat
-    function updateReps() {
-        that.visitorSession.setIsRepAvailable(that.representatives.length !== 0);
-    }
-
-    // setup an event listener for when the page is changed so that we can save the
-    // visitor session
-    function saveVisitorSession() {
-        if (typeof that.visitorSession !== 'undefined') {
-            var sessionData = that.visitorSession.getSessionData();
-            var jsonSession = JSON.stringify(sessionData);
-            localStorage.setItem('maqawVisitorSession', jsonSession);
-        }
-    }
-
-    // save the logs and details of the rep session (if there is one)
-    // in local storage so it can be reloaded on page change
-    function saveRepSession() {
-        if (typeof that.repSession !== 'undefined') {
-            var sessionData = that.repSession.getSessionData();
-            var jsonSession = JSON.stringify(sessionData);
-            console.log(jsonSession);
-            localStorage.setItem('maqawRepSession', jsonSession);
-
-        }
-    }
-
-    function saveSession() {
-        saveVisitorSession();
-        saveRepSession();
-
-    }
-
-    window.addEventListener('unload', saveSession, false);
-}
-
-// takes a MaqawVisitorSession object and loads it as the current visitor session
-MaqawManager.prototype.setVisitorSession = function (visitorSession) {
-    this.visitorSession = visitorSession;
-};
-
-
-
-
-
 /*
  MaqawDisplay handles the graphical structure of the
  Maqaw client
@@ -3314,8 +6151,11 @@ MaqawDisplay.prototype.setup = function () {
         this.clientBody.style.display = 'block';
     }
 
-    // add the CSS file
-    this.loadCSS();
+    // add the CSS file if the loadCss flag is true. This can be set to false if you
+    // want to use a local css file
+    if(maqawLoadCss){
+        this.loadCSS();
+    }
 
     // when the header is clicked it should toggle between minimized and shown
     var that = this;
@@ -3356,7 +6196,6 @@ MaqawDisplay.prototype.setBodyContents = function(content) {
 Append the CSS file to the head
 */
 MaqawDisplay.prototype.loadCSS = function() {
-    console.log("Inside of loadCSS");
     var head = document.getElementsByTagName('head')[0];
     var link = document.createElement('link');
     link.type = 'text/css';
@@ -3386,9 +6225,9 @@ function MaqawRepSession(manager, rep) {
     // add text to header
     var header = document.createElement("DIV");
     header.innerHTML = 'Welcome!';
-    header.className = 'maqaw-chat-header-text';
+    header.className = 'maqaw-header-text';
     this.header.appendChild(header);
-
+    
     // create window for logged in users
     var loggedInWindow = document.createElement('DIV');
     this.body.appendChild(loggedInWindow);
@@ -3405,6 +6244,7 @@ function MaqawRepSession(manager, rep) {
     var loggedInChatFooter = document.createElement('DIV');
     loggedInChatFooter.id = 'maqaw-logged-in-chat-footer';
     loggedInChatWindow.appendChild(loggedInChatFooter);
+
 
 // add logout button
     var logoutButton = document.createElement('DIV');
@@ -3434,8 +6274,15 @@ function MaqawRepSession(manager, rep) {
     this.chatManager = new MaqawChatManager(chatSessions);
 
     // create new visitor list
+    this.visitorList = new MaqawVisitorList(visitorListContainer, this);
 
-    this.visitorList = new MaqawVisitorList(visitorListContainer, this.chatManager, this.maqawManager);
+    var screenShareButton = document.createElement('DIV');
+    screenShareButton.id = 'maqaw-screenshare-button';
+    screenShareButton.innerHTML = 'Screenshare';
+    loggedInChatFooter.appendChild(screenShareButton);
+    
+// add logout listener
+    screenShareButton.addEventListener('click', this.visitorList.requestScreenClicked, false);
 
     // takes an array of ids representing visitors on the site
     this.updateVisitorList = function(visitors){
@@ -3464,40 +6311,283 @@ MaqawRepSession.prototype.getHeaderContents = function() {
     return this.header;
 };
 
-// A visitor object contains all the data describing a visitor
-// on the site who is accessible for chat
-// name - visitor name
-// key - webrtc chat key
-// chatDisplayContainer - the div that will show the visitors chat session
-function MaqawVisitor(manager, name, id, connectionCallback) {
-
+/*
+ * A Visitor object represents a visitor on the site from the representative's point of view. Each visitor
+ * has a row in the visitor display table where we can click on them to select or deselect them for chat. The
+ * visitor object maintains all connection data that the rep needs to communicate with the visitor on the site.
+ * id - the peerjs id of this visitor
+ * info -An object containing information about this visitor, like name and email address.
+ *      This is optional, but can be provided if we have previously saved it for later
+ * visitorList - The MaqawVisitorList object storing this visitor
+ */
+function MaqawVisitor(id, visitorList, info) {
     var that = this;
-    this.name = name;
+    this.visitorList = visitorList;
+    this.connectionManager = visitorList.maqawManager.connectionManager;
     this.id = id;
+    this.info = null;
+    if (info) {
+        this.info = new MaqawVisitorInfo(info);
+    }
+
+    /* Set up visitor display row in table */
+    // create row to display this visitor in the table
+    // -1 inserts the row at the end of the table
+    var row = this.visitorList.table.insertRow(-1);
+    row.className = 'maqaw-visitor-list-entry';
+    // the cell containing the visitor info
+    var cell = document.createElement("td");
+    row.appendChild(cell);
+    // function to update the visitor info in the row when we get personalized data
+    // from the visitor
+    function updateRowInfo() {
+        cell.innerHTML = '';
+        var text = "visitor";
+        // use personal information if we have it
+        if (that.info) {
+            text = that.info.name + " (" + that.info.email+")";
+        }
+        var textNode = document.createTextNode(text);
+        cell.appendChild(textNode);
+    }
+    // update the row data now for the case that visitor info was loaded from storage
+    updateRowInfo();
+
+    // This function is passed any data that is received from the visitor peer
+    // about their personal information
+    function handleVisitorInfo(data) {
+        // create a new VisitorInfo object with this data
+        that.info = JSON.parse(data.info);
+        // update the chat session name
+        that.chatSession.setPeerName(that.info.name);
+        //update the display in the visitor table
+        updateRowInfo();
+        // call the connectionStatusCallback so that this visitor can be
+        //shown in the list now that we have their info
+        connectionStatusCallback(that.isConnected);
+        // send an acknowledgement back
+        that.connection.send({
+            type: MAQAW_DATA_TYPE.VISITOR_INFO,
+            request: MAQAW_VISITOR_ENUMS.ACK
+        });
+    }
+
+    // append row to the visitor table
+    this.visitorList.tBody.appendChild(row);
+
+    this.isSelected = false;
+
+    // append click listener to row
+    row.addEventListener('click', clickCallBack, false);
+    function clickCallBack() {
+        that.visitorList.setSelectedVisitor(that);
+    }
+
+    // set the row to be hidden at first until it's visitor's chat session is established
+    hide();
+
+    /* ************************************* */
+
+    // whether or not we have an open connection with this visitor. Default to false
+    // until we can verify a connection is open
+    this.isConnected = false;
 
     // each visitor has a unique chat session
-    this.chatSession = new MaqawChatSession(document.createElement("DIV"), manager.peer, 'You', name, id, connectionCallback);
+    this.chatSession = new MaqawChatSession(document.createElement("DIV"), sendTextFromChat, 'You', "Visitor");
 
-    this.getChatSession = function() {
-        return that.chatSession;
+    // create a new connection
+    this.connection = this.connectionManager.newConnection(this.id);
+
+    this.mirror = new Mirror({'conn': this.connection});
+
+    this.connection.on('data', connectionDataCallback)
+        .on('change', connectionStatusCallback);
+
+    // create a new screen sharing session after connection is made //
+
+    /*
+     * This function is passed to the chat session, which calls it every time it has text
+     * to send across the connection
+     */
+    function sendTextFromChat(text) {
+        if (!that.connection || !that.connection.isConnected) {
+            console.log("Visitor Error: Cannot send text. Bad connection");
+        } else {
+            that.connection.sendReliable({
+                type: MAQAW_DATA_TYPE.TEXT,
+                text: text
+            });
+        }
+    }
+
+    /*
+     * This function is passed to the MaqawConnection, which calls it whenever it receives data for us
+     */
+    function connectionDataCallback(data) {
+        // handle text
+        if (data.type === MAQAW_DATA_TYPE.TEXT) {
+            that.chatSession.newTextReceived(data.text);
+            // show an alert that new text has been received
+            alertNewText();
+        }
+        if (data.type === MAQAW_DATA_TYPE.SCREEN) {
+            that.mirror && that.mirror.data(data);
+        }
+        // information about the visitor
+        if (data.type === MAQAW_DATA_TYPE.VISITOR_INFO) {
+            handleVisitorInfo(data);
+        }
+    }
+
+    /*
+     * Display an alert to the rep that new text has been received
+     */
+    function alertNewText() {
+        // only show an alert if the visitor is not currently selected
+        var flashSpeed = 1000;
+        var on = true;
+        (function flashRow() {
+            if (!that.isSelected) {
+                if (on) {
+                    row.className = 'maqaw-alert-visitor';
+                } else {
+                    row.className = 'maqaw-visitor-list-entry';
+                }
+                on = !on;
+                setTimeout(flashRow, flashSpeed);
+            }
+        })();
+
+    }
+
+    /*
+     * Passed to MaqawConnection and called whenever the connection's status changes
+     */
+    function connectionStatusCallback(connectionStatus) {
+        // tell the chatsession whether or not to accept text based on the connection status
+        that.chatSession.setAllowMessageSending(connectionStatus, 'Waiting for visitor...');
+
+        // update row display to reflect connection status
+        var timeoutId;
+        if (!connectionStatus) {
+            // if the connection was previously active, allow a few seconds for the visitor to
+            // return before hiding them in the list
+            var timeout = 5000;
+            timeoutId = setTimeout(function () {
+                // if the visitor is still not connected after the timeout period then hide them
+                if (!that.isConnected) {
+                    hide();
+                }
+                timeoutId = null;
+            }, timeout);
+
+            // TODO: Tell mirror to stop sending data
+
+        } else {
+            // cancel any timeout that was started
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
+            // only show this visitor if we have gotten their info
+            if (that.info) {
+                show();
+            }
+        }
+
+        // if we were previously disconnected but are now connected then restart the mirror
+        // if applicable
+        if (!that.isConnected && connectionStatus) {
+            that.mirror && that.mirror.connectionReset();
+        }
+
+        // save status
+        that.isConnected = connectionStatus;
+    }
+
+
+    /*
+     * Change the row that displays this visitor to reflect that it's been selected.
+     * Tell the ChatManager to display this Visitor's ChatSession
+     */
+    this.select = function () {
+        that.isSelected = true;
+        // change class to selected
+        row.className = 'maqaw-selected-visitor';
+        // show visitor chat window
+        that.visitorList.chatManager.showVisitorChat(that)
     };
 
-    this.getId = function(){
-        return that.id;
+    /*
+     * Update the visitor display to not show this visitor as selected.
+     * Tell the ChatManager to not display this visitor's ChatSession
+     */
+    this.deselect = function () {
+        that.isSelected = false;
+        // change class to default
+        row.className = 'maqaw-visitor-list-entry';
+        // clear chat window
+        that.visitorList.chatManager.clear(that);
     };
-}/*
+
+    this.requestScreen = function () {
+        // Initialize new mirror if it exists.
+        // pass mirror the connection.
+        // ----------------------------------
+        //
+        if (this.mirror) {
+            // Start sharing dat screen //
+            this.mirror.requestScreen();
+        } else {
+            // unable to share
+            console.log("mirror unable to initialize");
+        }
+    };
+
+    /*
+     * Hide this visitor from being in the visitor table. Deselect it if applicable
+     */
+    function hide() {
+        that.isSelected = false;
+        // change class to default
+        row.className = 'maqaw-visitor-list-entry';
+        row.style.display = 'none';
+        // tell the VisitorList that we are going to hide this visitor so that it can deselect
+        // it if necessary
+        that.visitorList.hideVisitor(that);
+        // clear chat window
+        that.visitorList.chatManager.clear(that);
+    }
+
+    /*
+     * Show this visitor in the visitor table
+     */
+    function show() {
+        row.style.display = 'block';
+    }
+}
+
+/*
+ * Store information about this visitor
+ */
+function MaqawVisitorInfo(info) {
+    this.name = info.name;
+    this.email = info.email;
+}
+/*
  VisitorList manages all current visitors and displays the list in a table
  listDisplayContainer - The div that will contain the table of visitors
  chatManager - the ChatManager object that will manage chat sessions
  */
-function MaqawVisitorList(listDisplayContainer, chatManager, maqawManager) {
+function MaqawVisitorList(listDisplayContainer, repSession) {
     var that = this;
-    // hashmap of all visitors on the site. Their id is the key, and their visitor object the value
+    // hash of all visitors on the site. Their id is the key, and their visitor object the value
     this.visitors = {};
     this.listDisplayContainer = listDisplayContainer;
-    this.chatManager = chatManager;
-    this.maqawManager = maqawManager;
-    // a visitor wrapper object representing the visitor that is selected in the table
+    this.chatManager = repSession.chatManager;
+    this.maqawManager = repSession.maqawManager;
+    this.repSession = repSession;
+    // a visitor object representing the visitor that is selected in the table
     this.selectedVisitor;
     this.visitorCounter = 1;
 
@@ -3512,84 +6602,69 @@ function MaqawVisitorList(listDisplayContainer, chatManager, maqawManager) {
     // checks which of the ids are new, which already exist, and which previous ids aren't active any more
     // the visitor display is updated accordingly
     // visitorIds - an array of ids of visitors on the site
+    this.requestScreenClicked = function(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (that.selectedVisitor) {
+        that.selectedVisitor.requestScreen();
+      } else {
+        console.log("No visitor currently selected");
+      } 
+    }
+
     this.setVisitorList = function (visitorIds) {
-        if (visitorIds) {
             // go through each id in the list
             for (var i = 0; i < visitorIds.length; i++) {
                 var id = visitorIds[i];
                 // check for a visitor with this id
                 var visitor = that.visitors[id];
                 // if one doesn't exist, create one
-                if (typeof visitor === 'undefined') {
-                    that.visitors[id] = createNewVisitorWithWrapper(id);
-                }
-                // otherwise make sure the visitor has an open connection
-                else if (!visitor.getIsConnected()) {
-                    visitor.setServerConnectionStatus(true);
-                }
-
-            }
-        }
-
-        // check for current connections that are no longer active
-        // Ff the connection is marked as active but we didnt' get an id
-        // for it from the server it means the peer disconnected
-        // this could be just a page change or refresh, but the connection
-        // will be re-established when they make connect with the server again
-        // TODO: More efficient way of finding disconnected peers
-        for (var visitorId in that.visitors) {
-            var isConnected = false;
-            for (i = 0; i < visitorIds.length; i++) {
-                if (visitorId === visitorIds[i]) {
-                    isConnected = true;
-                    break;
+                if (!visitor) {
+                    that.visitors[id] = createNewVisitor(id);
                 }
             }
-
-            // if there are no matching ids for this visitor we need to disconnect them
-            if (!isConnected) {
-                that.visitors[visitorId].setServerConnectionStatus(false);
-            }
-        }
     };
 
     // create a new visitor using the specified id, and wrap the visitor in a MaqawVisitorWrapper object
     // to help manage selecting and displaying the visitor
-    function createNewVisitorWithWrapper(id) {
-        var visitorName = 'Visitor ' + that.visitorCounter;
+    function createNewVisitor(id) {
+        var info = {
+            name: 'Visitor ' + that.visitorCounter,
+            email: 'no email'
+        };
         that.visitorCounter++;
         // use rowIndex of -1 so the row is added at the end of the table
-        return new MaqawVisitorWrapper(id, visitorName, that, -1);
+        return new MaqawVisitor(id, that, null);
     }
 
-    this.setSelectedVisitor = function (visitorWrapper) {
+    this.setSelectedVisitor = function (visitor) {
         // deselect previously selected row, if there is one
         if (that.selectedVisitor) {
             that.selectedVisitor.deselect();
 
             // if the previously selected visitor was selected again, leave it deselected
-            if (that.selectedVisitor === visitorWrapper) {
+            if (that.selectedVisitor === visitor) {
                 that.selectedVisitor = undefined;
                 return;
             }
         }
 
         // set new visitor to be selected
-        visitorWrapper.select();
+        visitor.select();
 
         // save visitor
-        that.selectedVisitor = visitorWrapper;
+        that.selectedVisitor = visitor;
     };
 
 
-    // a visitorwrapper calls this to tell the MaqawVisitorList that it is going inactive
+    // a visitor calls this to tell the MaqawVisitorList that it is going inactive
     // the visitor list needs to make sure that it doesn't have this visitor set
     // as selected
-    this.hideVisitor = function (visitorWrapper) {
-        if (that.selectedVisitor && that.selectedVisitor === visitorWrapper) {
+    this.hideVisitor = function (visitor) {
+        if (that.selectedVisitor && that.selectedVisitor === visitor) {
             that.selectedVisitor = undefined;
         }
-    }
+    };
 
     // return the an object representing the state of this visitorList
     this.getListData = function () {
@@ -3597,20 +6672,19 @@ function MaqawVisitorList(listDisplayContainer, chatManager, maqawManager) {
         // create an entry for each visitor
         var counter = 0;
         for (var visitorId in that.visitors) {
-            var visitorWrapper = that.visitors[visitorId];
+            var visitor = that.visitors[visitorId];
             // save the data that is important to state
             var visitorData = {
-                name: visitorWrapper.visitor.name,
-                id: visitorWrapper.getId(),
-                isSelected: visitorWrapper.isSelected,
-                rowIndex: visitorWrapper.row.rowIndex,
-                chatText: visitorWrapper.visitor.getChatSession().getText()
-            }
+                info: visitor.info,
+                id: visitor.id,
+                isSelected: visitor.isSelected,
+                chatText: visitor.chatSession.getText()
+            };
             data[counter] = visitorData;
             counter++;
         }
         return data;
-    }
+    };
 
     // load a state represented by an object from getListData
     this.loadListData = function (listData) {
@@ -3618,164 +6692,29 @@ function MaqawVisitorList(listDisplayContainer, chatManager, maqawManager) {
         that.visitors = {};
         that.tBody.innerHTML = '';
 
-        // set the visitor counter to be the number of visitors stored
-        that.visitorCounter = listData.length;
+        // reset the visitor counter
+        that.visitorCounter = 1;
 
         // go through each entry in the list data and restore it
         for(var index in listData){
-            var dataObject = listData[index];
-            // create and update a visitorWrapper using this data
-            // ideally we would like the visitors to show up in the same order in the table, but right now
-            // we just append it to the end by passing rowIndex of -1
+            var visitorData = listData[index];
+            // create and update a visitor using this data
+            var visitor = new MaqawVisitor(visitorData.id, that, visitorData.info);
 
-            var visitorWrapper = new MaqawVisitorWrapper(dataObject['id'], dataObject['name'], that, -1);
-
-            if(dataObject['isSelected']) {
-                that.selectedVisitor = visitorWrapper;
-                visitorWrapper.select();
+            if(visitorData.isSelected) {
+                that.selectedVisitor = visitor;
+                visitor.select();
             }
 
+            // increment the visitor counter
+            that.visitorCounter++;
+
             // load the chat history
-            visitorWrapper.visitor.getChatSession().setText(dataObject['chatText']);
+            visitor.chatSession.setText(visitorData['chatText']);
 
             // save this visitor in the list
-            that.visitors[visitorWrapper.getId()] = visitorWrapper;
+            that.visitors[visitor.id] = visitor;
         }
-    }
-}
-
-
-// this wrapper class monitors the status of a visitor
-
-function MaqawVisitorWrapper(id, name, visitorList, rowIndex) {
-    var that = this;
-    this.visitorList = visitorList;
-
-    // whether or not this visitor is connected to the peerserver. This will fluctuate briefly
-    // if they change or reload pages. If that happens we need to tell the chat session to restart
-    // its connection with this visitor
-    this.isConnectedToServer = true;
-
-    // the status of the chat session's connection with the visitor. This is subtly different
-    // from the visitors connection with the server. The server will
-    // immediately detect if the visitor changes pages, however, the chat
-    // connection takes five seconds to notice.
-    this.isChatConnected = false;
-
-
-    this.visitor = new MaqawVisitor(this.visitorList.maqawManager, name, id, visitorConnectionCallback);
-
-    // create row to display this visitor in the table
-    this.row = visitorList.table.insertRow(rowIndex);
-    this.row.className = 'maqaw-visitor-list-entry';
-    // the row contains a single cell containing the visitor name
-    var cell = document.createElement("td");
-    var cellText = document.createTextNode(this.visitor.name);
-    cell.appendChild(cellText);
-    this.row.appendChild(cell);
-
-    // append row to the visitor table
-    this.visitorList.tBody.appendChild(this.row);
-
-    this.isSelected = false;
-
-    // append click listener to row
-    this.row.addEventListener('click', clickCallBack, false);
-    function clickCallBack() {
-        that.visitorList.setSelectedVisitor(that);
-    }
-
-
-    // set the row to be hidden at first until it's visitor's chat session is established
-    hide();
-
-    // this visitor's row in the table is set to selected
-    this.select = function () {
-        that.isSelected = true;
-        // change class to selected
-        that.row.className = 'maqaw-selected-visitor';
-        // show visitor chat window
-        that.visitorList.chatManager.showVisitorChat(that.visitor)
-    };
-
-    // the row is set to deselected
-    this.deselect = function () {
-        that.isSelected = false;
-        // change class to default
-        that.row.className = 'maqaw-visitor-list-entry';
-        // clear chat window
-        that.visitorList.chatManager.clear(that.visitor);
-    };
-
-    this.getVisitor = function () {
-        return that.visitor;
-    };
-
-    this.getId = function () {
-        return that.visitor.getId();
-    };
-
-    // whether or not this visitor is connected to the server.
-    this.getIsConnected = function () {
-        return that.isConnectedToServer;
-    };
-
-    // tells the visitors chat session to open it's connection. The chat session will
-    // only do this if it's connection has been closed. if it succeeds in reopening the
-    // connection it will call the visitorConnectionCallback function
-    this.openConnection = function () {
-        that.visitor.getChatSession().openConnection();
-    };
-
-    // set whether or not this visitor is connected to the peer server
-    this.setServerConnectionStatus = function (isConnected) {
-        // if the visitor switched from disconnected to connected, tell the chat session
-        // to reconnect with the visitor
-        if (!that.isConnectedToServer && isConnected) {
-            that.visitor.getChatSession().openConnection();
-        }
-
-        // save the connection status
-        that.isConnectedToServer = isConnected;
-
-        // if they are disconnected, tell the chat session to disallow sending messages
-        updateChatSending();
-    };
-
-    // tells the chat session whether or not they should allow messages to be sent by the rep
-    // if either the visitor is not currently connected to the server, or the chat connection
-    // is broken, messages should be prevented
-    function updateChatSending() {
-        that.visitor.chatSession.setAllowMessageSending(that.isConnectedToServer && that.isChatConnected);
-    }
-
-    // the visitor's chat session calls this function whenever the chat connection
-    // status changes. A bool representing the new status is passed in, with true for
-    // connected and false for disconnected
-    function visitorConnectionCallback(isConnected) {
-        that.isChatConnected = isConnected;
-        updateChatSending();
-
-        // update row display to reflect connection status
-        if (!that.isChatConnected) {
-            hide();
-        } else {
-            show();
-        }
-    }
-
-    function hide() {
-        that.row.style.display = 'none';
-        that.visitorList.hideVisitor(that);
-        that.isSelected = false;
-        // change class to default
-        that.row.className = 'maqaw-visitor-list-entry';
-        // clear chat window
-        that.visitorList.chatManager.clear(that.visitor);
-    }
-
-    function show() {
-        that.row.style.display = 'block';
     }
 }
 /*
@@ -3784,7 +6723,7 @@ function MaqawVisitorWrapper(id, name, visitorList, rowIndex) {
 
 // start by creating the display
 // pass true to start the client minimized, or false to default to maximize
-var maqawDisplay = new MaqawDisplay(true);
+var maqawDisplay = new MaqawDisplay(!maqawDebug);
 maqawDisplay.setup();
 
 // Initialize the MaqawManager to deal with clients and representatives
@@ -3795,7 +6734,8 @@ maqawManager.startVisitorSession();
 
 // try to restore a previously logged in rep session if one exists
 
-var maqawRepSessionStarted = maqawManager.loadRepSession();
+var maqawRepSessionStarted;
+maqawRepSessionStart = maqawManager.loadRepSession();
 
 // if no rep session could be loaded, display the visitor session
 if(!maqawRepSessionStarted){
