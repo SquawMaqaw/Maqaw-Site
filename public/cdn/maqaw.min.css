@@ -98,6 +98,7 @@
 }
 
 input[type="text"]#maqaw-visitor-name-field {
+    border-radius: 2px !important;
     margin: 8px 0 0 20px !important;
     padding: 3px !important;
     border: 1px solid grey !important;
@@ -105,7 +106,7 @@ input[type="text"]#maqaw-visitor-name-field {
     color: black !important;
     font-size: 13px !important;
     width: 200px !important;
-    height: 15px !important;
+    height: 25px !important;
 }
 
 input[type="text"]:focus#maqaw-visitor-name-field {
@@ -115,6 +116,7 @@ input[type="text"]:focus#maqaw-visitor-name-field {
 }
 
 input[type="text"]#maqaw-visitor-email-field {
+    border-radius: 2px !important;
     margin: 8px 0 0 20px !important;
     padding: 3px !important;
     border: 1px solid grey !important;
@@ -122,7 +124,7 @@ input[type="text"]#maqaw-visitor-email-field {
     color: black !important;
     font-size: 13px !important;
     width: 200px !important;
-    height: 15px !important;
+    height: 25px !important;
 }
 
 input[type="text"]:focus#maqaw-visitor-email-field {
@@ -141,7 +143,7 @@ input[type="text"]:focus#maqaw-visitor-email-field {
     cursor: pointer !important;
     margin-top: 8px !important;
     width: 50px !important;
-    height: 20px !important;
+    height: 25px !important;
     text-align: center !important;
     margin-left: 150px !important;
 }
@@ -246,6 +248,7 @@ textarea.maqaw-chat-entry {
 }
 
 input[type="text"]#maqaw-login-user-field {
+    border-radius: 2px !important;
     margin: 8px 0 0 20px !important;
     padding: 3px !important;
     border: 1px solid grey !important;
@@ -253,7 +256,7 @@ input[type="text"]#maqaw-login-user-field {
     color: black !important;
     font-size: 13px !important;
     width: 200px !important;
-    height: 15px !important;
+    height: 25px !important;
 }
 
 input[type="text"]:focus#maqaw-login-user-field {
@@ -263,6 +266,7 @@ input[type="text"]:focus#maqaw-login-user-field {
 }
 
 input[type="password"]#maqaw-login-password-field {
+    border-radius: 2px !important;
     margin: 8px 0 0 20px !important;
     padding: 3px !important;
     border: 1px solid grey !important;
@@ -270,7 +274,7 @@ input[type="password"]#maqaw-login-password-field {
     color: black !important;
     font-size: 13px !important;
     width: 200px !important;
-    height: 15px !important;
+    height: 25px !important;
 }
 
 input[type="password"]:focus#maqaw-login-password-field {
@@ -289,7 +293,7 @@ input[type="password"]:focus#maqaw-login-password-field {
     cursor: pointer !important;
     margin-top: 8px !important;
     width: 50px !important;
-    height: 20px !important;
+    height: 25px !important;
     text-align: center !important;
     margin-left: 20px !important;
 }
